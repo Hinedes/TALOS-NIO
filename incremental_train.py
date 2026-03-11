@@ -159,8 +159,16 @@ def load_continuous_val_stream(seq_root: Path):
     traj_path = seq_root / 'mps' / 'slam' / 'closed_loop_trajectory.csv'
 
     dp = data_provider.create_vrs_data_provider(str(vrs_path))
-    ts_right, imu_right = load_imu_stream(dp, SID_RIGHT)
-    ts_left,  imu_left  = load_imu_stream(dp, SID_LEFT)
+
+    # PATCH 1: Extract and apply hardware extrinsics for the validation stream
+    device_calib = dp.get_device_calibration()
+    T_device_right = device_calib.get_transform_device_sensor("imu-right")
+    R_device_imu_right = T_device_right.rotation().to_matrix().astype(np.float32)
+    T_device_left = device_calib.get_transform_device_sensor("imu-left")
+    R_device_imu_left = T_device_left.rotation().to_matrix().astype(np.float32)
+
+    ts_right, imu_right = load_imu_stream(dp, SID_RIGHT, R_device_imu_right)
+    ts_left,  imu_left  = load_imu_stream(dp, SID_LEFT,  R_device_imu_left)
     grid_ns, imu1_reg, _ = align_imu_streams(ts_right, imu_right, ts_left, imu_left, TARGET_HZ)
     gt_ts, gt_pos, gt_quat = load_gt_trajectory(traj_path)
 
@@ -312,18 +320,27 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
         # 10Hz Neural Correction (TALOS only)
         if len(accel_buf) == WINDOW_SIZE and step % 10 == 0:
-            win     = np.concatenate([accel_buf, gyro_buf], axis=-1)
+            win_accel = np.array(accel_buf)
+            win_gyro  = np.array(gyro_buf)
+
+            # PATCH 2: Rotate inference buffer into gravity-aligned frame
+            # using ESKF's current orientation estimate (device → world)
+            R_est = eskf_talos.orientation
+            win_accel_aligned = win_accel @ R_est.T
+            win_gyro_aligned  = win_gyro  @ R_est.T
+
+            win      = np.concatenate([win_accel_aligned, win_gyro_aligned], axis=-1)
             fft_flat = np.log1p(np.abs(np.fft.rfft(win[np.newaxis], axis=1))).reshape(1, -1).astype(np.float32)
 
             with torch.no_grad():
                 pred_delta, _, pred_cov = model(torch.tensor(fft_flat).to(device))
 
             pred_delta_np = pred_delta.cpu().numpy()[0]
-            pred_cov_np = pred_cov.cpu().numpy()[0]
+            pred_cov_np   = pred_cov.cpu().numpy()[0]
 
             v_world = eskf_talos.orientation @ (pred_delta_np / window_time)
-            
-            # Phase 3: The Dynamic Bouncer via Aleatoric Uncertainty
+
+            # Dynamic Bouncer via aleatoric uncertainty (with variance floor)
             R_obs_dynamic = np.diag(np.clip(np.exp(pred_cov_np), 1e-3, None))
             eskf_talos.update_velocity(v_world, R_obs=R_obs_dynamic)
 
