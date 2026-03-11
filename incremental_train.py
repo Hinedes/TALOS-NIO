@@ -320,16 +320,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
         # 10Hz Neural Correction (TALOS only)
         if len(accel_buf) == WINDOW_SIZE and step % 10 == 0:
-            win_accel = np.array(accel_buf)
-            win_gyro  = np.array(gyro_buf)
-
-            # PATCH 2: Rotate inference buffer into gravity-aligned frame
-            # using ESKF's current orientation estimate (device → world)
-            R_est = eskf_talos.orientation
-            win_accel_aligned = win_accel @ R_est.T
-            win_gyro_aligned  = win_gyro  @ R_est.T
-
-            win      = np.concatenate([win_accel_aligned, win_gyro_aligned], axis=-1)
+            win      = np.concatenate([accel_buf, gyro_buf], axis=-1)
             fft_flat = np.log1p(np.abs(np.fft.rfft(win[np.newaxis], axis=1))).reshape(1, -1).astype(np.float32)
 
             with torch.no_grad():
@@ -339,8 +330,6 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             pred_cov_np   = pred_cov.cpu().numpy()[0]
 
             v_world = eskf_talos.orientation @ (pred_delta_np / window_time)
-
-            # Dynamic Bouncer via aleatoric uncertainty (with variance floor)
             R_obs_dynamic = np.diag(np.clip(np.exp(pred_cov_np), 1e-3, None))
             eskf_talos.update_velocity(v_world, R_obs=R_obs_dynamic)
 
