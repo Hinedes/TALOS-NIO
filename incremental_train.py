@@ -117,7 +117,8 @@ class ESKF:
 
     def update_zaru(self, gyro_raw):
         H = np.zeros((3, 15))
-        H[0:3, 6:9] = np.eye(3)
+        H[0:3, 9:12] = -np.eye(3)  # CORRECTED: States 9:12 target the gyro bias
+        
         R_z = np.eye(3) * 1e-4
         z   = -(gyro_raw - self.bg)
         S   = H @ self.P @ H.T + R_z
@@ -128,9 +129,9 @@ class ESKF:
         
         self.position    += dx[0:3]
         self.velocity    += dx[3:6]
-        self.orientation  = self.orientation @ Rotation.from_rotvec(dx[6:9]).as_matrix()
         
-        # The Alpha Gate: Dampen bias updates by 10% to prevent false-positive frame destruction
+        # Orientation is untouched by ZARU. It is unobservable here.
+        # The Alpha Gate: Dampen bias updates
         self.bg += dx[9:12] * 0.1
         self.ba += dx[12:15] * 0.1
         
