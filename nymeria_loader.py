@@ -102,6 +102,9 @@ def make_windows(imu1, pos, quat, window, stride,):
 
         imu_window = imu1[s:e].copy()
 
+        # Zero out the gravity/DC component
+        imu_window[:, :3] = imu_window[:, :3] - np.mean(imu_window[:, :3], axis=0)
+
         imu1_windows.append(imu_window.astype(np.float32))
         trans_labels.append(delta_p_local.astype(np.float32))
         quat_labels.append(q_delta_wxyz)
