@@ -27,7 +27,7 @@ SID_LEFT  = StreamId("1202-2")   # imu-left  (noise reference)
 WINDOW_SIZE = 64      # samples
 STRIDE      = 10      # samples
 TARGET_HZ   = 100.0   # resample both IMUs to this rate before windowing
-NOISE_STD_DEG = 5.0   # Domain gap rotational noise injection
+
 
 def load_imu_stream(dp, sid, R_extrinsic=None) -> tuple[np.ndarray, np.ndarray]:
     n = dp.get_num_data(sid)
@@ -77,13 +77,12 @@ def interpolate_gt(gt_ts, gt_pos, gt_quat, imu_ts):
     imu_clamped = np.clip(imu_ts, gt_ts[0], gt_ts[-1])
     return pos_interp(imu_clamped).astype(np.float32), slerp(imu_clamped).as_quat().astype(np.float32)
 
-def make_windows(imu1, pos, quat, window, stride, noise_std_deg=NOISE_STD_DEG):
+def make_windows(imu1, pos, quat, window, stride,):
     N = len(imu1)
     starts = range(0, N - window, stride)
 
     imu1_windows = []
     trans_labels, quat_labels  = [], []
-    noise_std_rad = np.radians(noise_std_deg)
 
     for s in starts:
         e = s + window
