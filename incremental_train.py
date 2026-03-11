@@ -54,8 +54,9 @@ INPUT_DIM   = N_BINS * N_CHANNELS  # 198
 ESKF_DT     = 1.0 / TARGET_HZ
 
 # ZARU Config
-ZARU_WINDOW    = 50
-ZARU_THRESHOLD = 1e-4
+ZARU_WINDOW          = 50
+ZARU_THRESHOLD       = 1e-4
+ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
 
 # ESKF Physics Engine
 class ESKF:
@@ -101,9 +102,9 @@ class ESKF:
         
         S  = H @ self.P @ H.T + R_obs
         r  = vel - self.velocity
-        Si = np.linalg.inv(S)
         
-        K  = self.P @ H.T @ Si
+        # Robust matrix solve to prevent catastrophic conditioning failure
+        K = np.linalg.solve(S.T, (self.P @ H.T).T).T
         
         # OVERLORD QUARANTINE : neural predictions restricted to position + velocity only
         # Orientation and biases (states 6:15) are zeroed at the gain level.
@@ -120,13 +121,19 @@ class ESKF:
         R_z = np.eye(3) * 1e-4
         z   = -(gyro_raw - self.bg)
         S   = H @ self.P @ H.T + R_z
-        K   = self.P @ H.T @ np.linalg.inv(S)
+        
+        # Robust matrix solve
+        K = np.linalg.solve(S.T, (self.P @ H.T).T).T
         dx  = K @ z
+        
         self.position    += dx[0:3]
         self.velocity    += dx[3:6]
         self.orientation  = self.orientation @ Rotation.from_rotvec(dx[6:9]).as_matrix()
-        self.bg += dx[9:12]
-        self.ba += dx[12:15]
+        
+        # The Alpha Gate: Dampen bias updates by 10% to prevent false-positive frame destruction
+        self.bg += dx[9:12] * 0.1
+        self.ba += dx[12:15] * 0.1
+        
         self.P  = (np.eye(15) - K @ H) @ self.P
 
 # Data Pipeline
@@ -321,7 +328,11 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
         # ZARU (TALOS only)
         if len(gyro_buf) >= ZARU_WINDOW and step % ZARU_WINDOW == 0:
-            if np.var(np.array(gyro_buf[-ZARU_WINDOW:]), axis=0).sum() < ZARU_THRESHOLD:
+            gyro_var = np.var(np.array(gyro_buf[-ZARU_WINDOW:]), axis=0).sum()
+            accel_var = np.var(np.array(accel_buf[-ZARU_WINDOW:]), axis=0).sum()
+            
+            # Dual-sensor lock to prevent false positives during slow motion
+            if gyro_var < ZARU_THRESHOLD and accel_var < ZARU_ACCEL_THRESHOLD:
                 eskf_talos.update_zaru(g)
                 # Hardcoded low noise for verified zero-velocity updates
                 eskf_talos.update_velocity(np.zeros(3), R_obs=np.eye(3) * 1e-4)
