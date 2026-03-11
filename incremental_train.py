@@ -327,10 +327,10 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             win_accel_corrected = win_accel - np.mean(win_accel, axis=0)
             
             win = np.concatenate([win_accel_corrected, win_gyro], axis=-1)
-            fft_flat = np.log1p(np.abs(np.fft.rfft(win[np.newaxis], axis=1))).reshape(1, -1).astype(np.float32)
+            win_tensor = torch.tensor(win.T[np.newaxis], dtype=torch.float32)  # (1, 6, 64)
 
             with torch.no_grad():
-                pred_delta, _, pred_cov = model(torch.tensor(fft_flat).to(device))
+                pred_delta, _, pred_cov = model(win_tensor.to(device))
 
             pred_delta_np = pred_delta.cpu().numpy()[0]
             pred_cov_np   = pred_cov.cpu().numpy()[0]
