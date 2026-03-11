@@ -29,7 +29,7 @@ STRIDE      = 10      # samples
 TARGET_HZ   = 100.0   # resample both IMUs to this rate before windowing
 NOISE_STD_DEG = 5.0   # Domain gap rotational noise injection
 
-def load_imu_stream(dp, sid) -> tuple[np.ndarray, np.ndarray]:
+def load_imu_stream(dp, sid, R_extrinsic=None) -> tuple[np.ndarray, np.ndarray]:
     n = dp.get_num_data(sid)
     timestamps = np.empty(n, dtype=np.float64)
     imu_data   = np.empty((n, 6), dtype=np.float32)
@@ -37,8 +37,17 @@ def load_imu_stream(dp, sid) -> tuple[np.ndarray, np.ndarray]:
     for i in range(n):
         s = dp.get_imu_data_by_index(sid, i)
         timestamps[i]  = s.capture_timestamp_ns
-        imu_data[i, :3] = s.accel_msec2
-        imu_data[i, 3:] = s.gyro_radsec
+        
+        accel = np.array(s.accel_msec2, dtype=np.float32)
+        gyro  = np.array(s.gyro_radsec, dtype=np.float32)
+        
+        # The Extrinsic Fix: Rotate from raw Hardware Sensor Frame to SLAM Device Frame
+        if R_extrinsic is not None:
+            accel = R_extrinsic @ accel
+            gyro  = R_extrinsic @ gyro
+            
+        imu_data[i, :3] = accel
+        imu_data[i, 3:] = gyro
 
     return timestamps, imu_data
 
@@ -124,9 +133,19 @@ def load_sequence(sequence_root: str | Path, window: int = WINDOW_SIZE, stride: 
     print(f"[nymeria_loader] Opening {vrs_path.name}...")
     dp = data_provider.create_vrs_data_provider(str(vrs_path))
 
-    print("[nymeria_loader] Reading imu-right (primary) and imu-left (reference)...")
-    ts_right, imu_right = load_imu_stream(dp, SID_RIGHT)
-    ts_left, imu_left = load_imu_stream(dp, SID_LEFT)
+    # Extract Hardware Extrinsics (Sensor -> Device)
+    print("[nymeria_loader] Extracting Aria factory extrinsics...")
+    device_calib = dp.get_device_calibration()
+    
+    T_device_right = device_calib.get_transform_device_sensor("imu-right")
+    R_device_imu_right = T_device_right.rotation().to_matrix().astype(np.float32)
+    
+    T_device_left = device_calib.get_transform_device_sensor("imu-left")
+    R_device_imu_left = T_device_left.rotation().to_matrix().astype(np.float32)
+
+    print("[nymeria_loader] Reading and calibrating imu-right (primary) and imu-left (reference)...")
+    ts_right, imu_right = load_imu_stream(dp, SID_RIGHT, R_device_imu_right)
+    ts_left,  imu_left  = load_imu_stream(dp, SID_LEFT, R_device_imu_left)
 
     print(f"[nymeria_loader] Aligning streams at {target_hz:.0f}Hz (No fusion)...")
     grid_ns, imu1_reg, imu2_reg = align_imu_streams(ts_right, imu_right, ts_left, imu_left, target_hz)
