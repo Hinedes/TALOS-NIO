@@ -109,6 +109,9 @@ def make_windows(imu1, pos, quat, window, stride, augment=True):
         q_delta_wxyz = np.array([q_delta_xyzw[3], q_delta_xyzw[0], q_delta_xyzw[1], q_delta_xyzw[2]], dtype=np.float32)
 
         imu_window = imu1[s:e].copy()
+        if augment:
+            shift = np.random.randint(0, 10)
+            imu_window = np.roll(imu_window, shift, axis=0)
 
         # --- Data Augmentation (training only) ---
         if augment:

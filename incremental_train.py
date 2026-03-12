@@ -31,18 +31,18 @@ from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, TensorDataset
 from projectaria_tools.core import data_provider
 
-from SMLP import SpectralMLP
+from SMLP import BigSpectralMLP as SpectralMLP
 from nymeria_loader import (load_sequence, load_imu_stream, align_imu_streams,
                             load_gt_trajectory, interpolate_gt,
                             SID_RIGHT, SID_LEFT, TARGET_HZ)
 
 # Configuration
-PATIENCE               = 8      # ESKF ATE strikes before halting (physical overfitting)
+PATIENCE               = 15      # ESKF ATE strikes before halting (physical overfitting)
 LOSS_PATIENCE          = 20     # Loss stagnation strikes before halting (dead model)
 LOSS_MIN_DELTA         = 1e-5   # Minimum loss improvement to count as progress
 WARMUP_LOSS_THRESHOLD  = 0.010  # Don't run ESKF eval until loss drops below this
 STORAGE_FLOOR_GB       = 30.0
-EPOCHS_PER_ROUND       = 10
+EPOCHS_PER_ROUND       = 20
 BATCH_SIZE             = 4096
 VAL_SUBJECT            = 'shelby_arroyo'  # 63m locomotion stress test
 
@@ -142,13 +142,12 @@ def accumulate(existing: dict | None, new: dict) -> dict:
     if existing is None: return {k: v.copy() for k, v in new.items()}
     return {k: np.concatenate([existing[k], new[k]], axis=0) for k in new}
 
-def to_spectral(imu_windows: np.ndarray) -> np.ndarray:
-    fft_complex = np.fft.rfft(imu_windows, axis=1)
-    fft_log     = np.log1p(np.abs(fft_complex))
-    return fft_log.reshape(len(imu_windows), -1).astype(np.float32)
+def to_raw(imu_windows: np.ndarray) -> np.ndarray:
+    # (N, 64, 6) -> (N, 6, 64) for Conv1d
+    return imu_windows.transpose(0, 2, 1).astype(np.float32)
 
 def make_tensors(data: dict, device: torch.device):
-    X = torch.from_numpy(to_spectral(data['imu1_features'])).to(device)
+    X = torch.from_numpy(to_raw(data['imu1_features'])).to(device)
     T = torch.from_numpy(data['trans']).to(device)
     Q = torch.from_numpy(data['quat']).to(device)
     return X, T, Q
@@ -220,19 +219,17 @@ def download_sequence(seq_id: str, entry: dict, root: Path) -> Path | None:
     return seq_path
 
 # Training
-def train_round(model, train_data, val_data, device, epochs, checkpoint_path):
+def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpoint_path):
     X_tr, T_tr, Q_tr = make_tensors(train_data, device)
     X_va, T_va, Q_va = make_tensors(val_data,   device)
     loader = DataLoader(TensorDataset(X_tr, T_tr, Q_tr), batch_size=BATCH_SIZE, shuffle=True)
-    opt   = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=5e-3,
-                                                 steps_per_epoch=len(loader), epochs=epochs)
 
     best_val, t_losses = float('inf'), []
 
     def loss_fn(pt, pq, pcov, gt, gq):
         # Phase 2: Gaussian Negative Log-Likelihood for translation + aleatoric uncertainty
-        nll_trans = 0.5 * (torch.exp(-pcov) * (gt - pt)**2 + pcov)
+        pcov_c = torch.clamp(pcov, min=-4.0, max=4.0)
+        nll_trans = 0.5 * (torch.exp(-pcov_c) * (gt - pt)**2 + pcov_c)
         lt = nll_trans.sum(dim=1).mean()
         
         # Standard cosine-like loss for quaternion orientation
@@ -248,10 +245,11 @@ def train_round(model, train_data, val_data, device, epochs, checkpoint_path):
             pt, pq, pcov = model(xb)
             loss = loss_fn(pt, pq, pcov, tb, qb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
-            sched.step()
             ep_loss += loss.item()
         t_losses.append(ep_loss / len(loader))
+        sched.step(t_losses[-1])
 
         model.eval()
         with torch.no_grad():
@@ -436,7 +434,14 @@ def main():
     with open(args.manifest) as f:
         manifest = json.load(f)['sequences']
 
+    import random
     train_seqs = [(sid, e) for sid, e in manifest.items() if VAL_SUBJECT not in sid]
+    def _on_disk(item):
+        sid, e = item
+        bundle = e.get("recording_head", {})
+        fn = bundle.get("filename", "")
+        return 0 if (root / Path(fn).stem).exists() else 1
+    train_seqs.sort(key=_on_disk)
     val_seqs   = [(sid, e) for sid, e in manifest.items() if VAL_SUBJECT in sid]
 
     print(f"\n:: Pre-loading ESKF Validation Baseline ({VAL_SUBJECT}) ::")
@@ -446,7 +451,9 @@ def main():
     val_data = load_sequence(val_seq_path, augment=False)
     print(f"  Val Sequence loaded. Duration: {len(val_df)*ESKF_DT:.1f}s")
 
-    model      = SpectralMLP(INPUT_DIM).to(device)
+    model      = SpectralMLP().to(device)
+    opt        = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
+    sched      = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=3, min_lr=1e-5)
     train_data = None
     history    = []
 
@@ -475,7 +482,7 @@ def main():
             continue
 
         print(f"  [Train] Pool size: {train_data['trans'].shape[0]:,} windows")
-        train_final, _ = train_round(model, train_data, val_data, device,
+        train_final, _ = train_round(model, opt, sched, train_data, val_data, device,
                                      EPOCHS_PER_ROUND, golden / 'talos.pth')
 
         if best_loss_ever - train_final > LOSS_MIN_DELTA:
