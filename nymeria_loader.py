@@ -85,11 +85,12 @@ def _random_yaw_rotation():
                      [s,  c, 0],
                      [0,  0, 1]], dtype=np.float32)
 
-def make_windows(imu1, pos, quat, window, stride, augment=True):
+def make_windows(imu1, imu2, pos, quat, window, stride, augment=True):
     N = len(imu1)
     starts = range(0, N - window, stride)
 
     imu1_windows = []
+    imu2_windows = []
     trans_labels, quat_labels  = [], []
 
     for s in starts:
@@ -142,12 +143,16 @@ def make_windows(imu1, pos, quat, window, stride, augment=True):
         # Zero out the gravity/DC component (after augmentation so bias doesn't leak into DC)
         imu_window[:, :3] = imu_window[:, :3] - np.mean(imu_window[:, :3], axis=0)
 
+        imu2_window = imu2[s:e].copy()
+        imu2_window[:, :3] -= np.mean(imu2_window[:, :3], axis=0)
         imu1_windows.append(imu_window.astype(np.float32))
+        imu2_windows.append(imu2_window.astype(np.float32))
         trans_labels.append(delta_p_local.astype(np.float32))
         quat_labels.append(q_delta_wxyz)
 
     return {
         'imu1_features': np.stack(imu1_windows).astype(np.float32),
+        'imu2_features': np.stack(imu2_windows).astype(np.float32),
         'trans':         np.stack(trans_labels).astype(np.float32),
         'quat':          np.stack(quat_labels).astype(np.float32),
     }
@@ -186,12 +191,13 @@ def load_sequence(sequence_root: str | Path, window: int = WINDOW_SIZE, stride: 
     mask        = (grid_ns >= gt_ts[0]) & (grid_ns <= gt_ts[-1])
     grid_ns     = grid_ns[mask]
     imu1_reg    = imu1_reg[mask]
+    imu2_reg    = imu2_reg[mask]
     pos_at_imu  = pos_at_imu[mask]
     quat_at_imu = quat_at_imu[mask]
     print(f"[nymeria_loader] Trimmed to GT coverage : {len(grid_ns)} samples remaining")
 
     print(f"[nymeria_loader] Windowing (size={window}, stride={stride}, augment={augment})...")
-    result = make_windows(imu1_reg, pos_at_imu, quat_at_imu, window, stride, augment=augment)
+    result = make_windows(imu1_reg, imu2_reg, pos_at_imu, quat_at_imu, window, stride, augment=augment)
 
     duration_s = (grid_ns[-1] - grid_ns[0]) / 1e9
     print(f"[nymeria_loader] Done : {len(result['trans'])} windows from {duration_s:.1f}s")

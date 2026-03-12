@@ -32,6 +32,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from projectaria_tools.core import data_provider
 
 from SMLP import BigSpectralMLP as SpectralMLP
+from laid import LAIDBouncer
 from nymeria_loader import (load_sequence, load_imu_stream, align_imu_streams,
                             load_gt_trajectory, interpolate_gt,
                             SID_RIGHT, SID_LEFT, TARGET_HZ)
@@ -168,7 +169,7 @@ def load_continuous_val_stream(seq_root: Path):
 
     ts_right, imu_right = load_imu_stream(dp, SID_RIGHT, R_device_imu_right)
     ts_left,  imu_left  = load_imu_stream(dp, SID_LEFT,  R_device_imu_left)
-    grid_ns, imu1_reg, _ = align_imu_streams(ts_right, imu_right, ts_left, imu_left, TARGET_HZ)
+    grid_ns, imu1_reg, imu2_reg = align_imu_streams(ts_right, imu_right, ts_left, imu_left, TARGET_HZ)
     gt_ts, gt_pos, gt_quat = load_gt_trajectory(traj_path)
 
     df_traj = pd.read_csv(traj_path)
@@ -196,6 +197,8 @@ def load_continuous_val_stream(seq_root: Path):
         'vx': vel_at_imu[mask, 0], 'vy': vel_at_imu[mask, 1], 'vz': vel_at_imu[mask, 2],
         'qx': quat_at_imu[mask, 0], 'qy': quat_at_imu[mask, 1],
         'qz': quat_at_imu[mask, 2], 'qw': quat_at_imu[mask, 3],
+        'ax2': imu2_reg[mask, 0], 'ay2': imu2_reg[mask, 1], 'az2': imu2_reg[mask, 2],
+        'wx2': imu2_reg[mask, 3], 'wy2': imu2_reg[mask, 4], 'wz2': imu2_reg[mask, 5],
     })
     return df, true_gravity
 
@@ -284,6 +287,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     model.eval()
 
     accel  = df[['ax','ay','az']].values.astype(np.float32)
+    accel2 = df[['ax2','ay2','az2']].values.astype(np.float32)
+    gyro2  = df[['wx2','wy2','wz2']].values.astype(np.float32)
     gyro   = df[['wx','wy','wz']].values.astype(np.float32)
     gt_pos = df[['px','py','pz']].values
     gt_pos = gt_pos - gt_pos[0]
@@ -296,7 +301,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         e.velocity    = init_vel_world.copy()
         e.orientation = init_rot.copy()
 
+    laid_bouncer = LAIDBouncer()
     accel_buf, gyro_buf = [], []
+    accel2_buf, gyro2_buf = [], []
     talos_positions, pure_positions = [], []
     window_time = WINDOW_SIZE * dt
 
@@ -311,10 +318,14 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
         accel_buf.append(a)
         gyro_buf.append(g)
+        accel2_buf.append(accel2[step])
+        gyro2_buf.append(gyro2[step])
 
         if len(accel_buf) > WINDOW_SIZE:
             accel_buf.pop(0)
             gyro_buf.pop(0)
+            accel2_buf.pop(0)
+            gyro2_buf.pop(0)
 
         # 10Hz Neural Correction (TALOS only)
         if len(accel_buf) == WINDOW_SIZE and step % 10 == 0:
@@ -333,9 +344,16 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             pred_delta_np = pred_delta.cpu().numpy()[0]
             pred_cov_np   = pred_cov.cpu().numpy()[0]
 
-            v_world = eskf_talos.orientation @ (pred_delta_np / window_time)
-            R_obs_dynamic = np.diag(np.clip(np.exp(pred_cov_np), 1e-3, None))
-            eskf_talos.update_velocity(v_world, R_obs=R_obs_dynamic)
+            # LAID veto
+            win2_accel = np.array(accel2_buf) - np.mean(np.array(accel2_buf), axis=0)
+            win2_gyro  = np.array(gyro2_buf)
+            win2       = np.concatenate([win2_accel, win2_gyro], axis=-1)
+            win1       = np.concatenate([win_accel_corrected, win_gyro], axis=-1)
+            laid_veto, laid_rms = laid_bouncer.check(win1, win2)
+            if not laid_veto:
+                v_world = eskf_talos.orientation @ (pred_delta_np / window_time)
+                R_obs_dynamic = np.diag(np.clip(np.exp(pred_cov_np), 1e-3, None))
+                eskf_talos.update_velocity(v_world, R_obs=R_obs_dynamic)
 
         # ZARU (TALOS only)
         if len(gyro_buf) >= ZARU_WINDOW and step % ZARU_WINDOW == 0:
