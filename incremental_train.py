@@ -368,6 +368,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
     talos_positions = np.array(talos_positions)
     pure_positions  = np.array(pure_positions)
+    evaluate_eskf._last_talos_pos = talos_positions
+    evaluate_eskf._last_gt_pos    = pure_positions
     talos_err       = np.linalg.norm(talos_positions - gt_pos, axis=1)
     mean_ate        = talos_err.mean()
     final_ate       = talos_err[-1]
@@ -460,6 +462,11 @@ def main():
         fn = bundle.get("filename", "")
         return 0 if (root / Path(fn).stem).exists() else 1
     train_seqs.sort(key=_on_disk)
+    # Shuffle within each group independently
+    on_disk  = [x for x in train_seqs if _on_disk(x) == 0]
+    off_disk = [x for x in train_seqs if _on_disk(x) == 1]
+    random.shuffle(on_disk)
+    train_seqs = on_disk + off_disk
     val_seqs   = [(sid, e) for sid, e in manifest.items() if VAL_SUBJECT in sid]
 
     print(f"\n:: Pre-loading ESKF Validation Baseline ({VAL_SUBJECT}) ::")
@@ -521,7 +528,9 @@ def main():
             continue
 
         print("  [ESKF]  Integrating validation sequence...")
-        mean_ate = evaluate_eskf(model, val_df, val_gravity, device, round_idx, golden)
+        # Skip stationary period (first 313s), evaluate on real walking only
+        val_df_walk = val_df.iloc[313*100:].reset_index(drop=True)
+        mean_ate = evaluate_eskf(model, val_df_walk, val_gravity, device, round_idx, golden, max_seconds=300)
         print(f"  [Result] Neural Loss: {train_final:.4f} | ESKF ATE: {mean_ate:.3f}m")
 
         history.append({'round': round_idx, 'ate': mean_ate, 'train_loss': train_final})
