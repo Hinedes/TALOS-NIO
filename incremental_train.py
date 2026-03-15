@@ -118,7 +118,7 @@ class ESKF:
         # OVERLORD QUARANTINE: orientation and biases zeroed at gain level
         K[6:15, :] = 0.0
 
-        dx = K @ r
+        dx = np.clip(K @ r, -2.0, 2.0)
         self.position += dx[0:3]
         self.velocity += dx[3:6]
         self.P = (np.eye(15) - K @ H) @ self.P
