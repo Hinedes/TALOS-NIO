@@ -560,7 +560,7 @@ def main():
             best_ate_ever = mean_ate
             best_ate_round = round_idx
             bad_rounds    = 0
-            shutil.copy(golden / 'talos.pth', golden / 'talos_best_physical.pth')
+            shutil.copy(golden / 'talos.pth', run_dir / 'talos_best_physical.pth')
             print(f"  [Best]  New best ATE: {mean_ate:.3f}m : checkpoint saved.")
         else:
             bad_rounds += 1
