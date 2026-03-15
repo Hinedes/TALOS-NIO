@@ -223,3 +223,22 @@ if __name__ == '__main__':
     print(f"  imu1[0,0]: {out['imu1_features'][0, 0]}")
     print(f"  trans[0]:  {out['trans'][0]}")
     print(f"  quat[0]:   {out['quat'][0]}")
+# ---------------------------------------------------------------------------
+# Cached loader -- bypasses VRS entirely if golden/cache/<seq_id>.npz exists
+# ---------------------------------------------------------------------------
+CACHE_DIR = Path('/mnt/c/TALOS/golden/cache')
+
+def load_sequence_cached(sequence_root: str | Path, window: int = WINDOW_SIZE,
+                         stride: int = STRIDE, augment: bool = True) -> dict:
+    root   = Path(sequence_root)
+    seq_id = root.parent.name if root.name == "recording_head" else root.name          # e.g. Nymeria_v0.0_..._recording_head -> parent
+    cache  = CACHE_DIR / f"{seq_id}.npz"
+
+    if cache.exists():
+        print(f"[cache] HIT {seq_id[:40]}")
+        d = np.load(cache)
+        return make_windows(d['imu1'], d['imu2'], d['pos'], d['quat'],
+                            window, stride, augment=augment)
+
+    print(f"[cache] MISS {seq_id[:40]} -- falling back to VRS")
+    return load_sequence(sequence_root, window=window, stride=stride, augment=augment)
