@@ -125,6 +125,21 @@ class ESKF:
         self.velocity += dx[3:6]
         self.P = (np.eye(15) - K @ H) @ self.P
 
+
+    def update_position(self, pos, R_obs):
+        """Positional pseudo-measurement for biomechanical cage enforcement."""
+        if not np.all(np.isfinite(pos)): return
+        H = np.zeros((3, 15))
+        H[0:3, 0:3] = np.eye(3)
+        S = H @ self.P @ H.T + R_obs
+        r = pos - self.position
+        K = np.linalg.solve(S.T, (self.P @ H.T).T).T
+        K[6:15, :] = 0.0  # Quarantine
+        dx = np.clip(K @ r, -2.0, 2.0)
+        self.position += dx[0:3]
+        self.velocity += dx[3:6]
+        self.P = (np.eye(15) - K @ H) @ self.P
+
     def update_zaru(self, gyro_raw):
         H = np.zeros((3, 15))
         H[0:3, 9:12] = -np.eye(3)  # CORRECTED: States 9:12 target the gyro bias
@@ -398,7 +413,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         distance = np.linalg.norm(head_vector)
 
         if distance > 0.12:
-            eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * 0.12
+            cage_wall = evaluate_eskf._cage_center + (head_vector / distance) * 0.12
+            eskf_talos.update_position(cage_wall, np.eye(3) * 1e-4)
 
     talos_positions = np.array(talos_positions)
     pure_positions  = np.array(pure_positions)
