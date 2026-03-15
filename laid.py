@@ -116,6 +116,62 @@ class LAIDBouncer:
         return vetos, residuals
 
 
+    def yaw_anchor(self, imu1_window, imu2_window, dt=None):
+        """
+        Compute yaw pseudo-measurement from tangential velocity differential.
+
+        During rotation, the two IMUs experience differential tangential velocity:
+            v_diff = v_imu2 - v_imu1 = omega x r
+
+        Invert to extract angular velocity observation:
+            omega_obs = (r x v_diff) / |r|^2
+
+        Returns the vertical (yaw) component as a pseudo-measurement for ESKF,
+        plus a trust weight based on |omega| magnitude.
+
+        Returns:
+            omega_yaw : float  -- yaw rate observation [rad/s]
+            trust     : float  -- [0, 1], 0 = unreliable, 1 = high confidence
+            omega_mag : float  -- magnitude of angular rate for logging
+        """
+        if dt is None:
+            dt = self.dt
+
+        g1 = imu1_window[:, 3:].astype(np.float64)  # (64, 3) gyro IMU1
+        g2 = imu2_window[:, 3:].astype(np.float64)  # (64, 3) gyro IMU2
+        a1 = imu1_window[:, :3].astype(np.float64)
+        a2 = imu2_window[:, :3].astype(np.float64)
+
+        # Mean angular velocity from IMU1 gyro
+        omega = np.mean(g1, axis=0)  # (3,)
+        omega_mag = np.linalg.norm(omega)
+
+        # Below threshold -- rotation too slow, differential signal unreliable
+        if omega_mag < 0.05:
+            return 0.0, 0.0, omega_mag
+
+        # Integrate gyro to get delta-angle velocity estimate
+        # v_tangential = omega x r  (predicted)
+        v_pred = np.cross(omega, self.r)  # (3,)
+
+        # Integrate accel differential over window to get velocity differential
+        a_diff = a2 - a1  # (64, 3)
+        v_diff = np.cumsum(a_diff, axis=0)[-1] * dt  # integrate -> velocity differential
+
+        # Extract omega from differential: omega_obs = (r x v_diff) / |r|^2
+        r_mag_sq = np.dot(self.r, self.r)
+        omega_obs = np.cross(self.r, v_diff) / r_mag_sq  # (3,)
+
+        # Yaw component (Z axis in device frame)
+        omega_yaw = omega_obs[2]
+
+        # Trust: normalized omega magnitude, capped at 1
+        trust = float(np.clip(omega_mag / 1.0, 0.0, 1.0))
+
+        return float(omega_yaw), trust, float(omega_mag)
+
+
+
 if __name__ == '__main__':
     # Smoke test
     bouncer = LAIDBouncer()
