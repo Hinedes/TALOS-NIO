@@ -382,6 +382,24 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 # Hardcoded low noise for verified zero-velocity updates
                 eskf_talos.update_velocity(np.zeros(3), R_obs=np.eye(3) * 1e-4)
 
+
+        # ---------------------------------------------------------
+        # THE CAGE: Biomechanical Positional Clamp (12cm radius)
+        # ---------------------------------------------------------
+        current_npp_world = eskf_talos.position + eskf_talos.orientation @ npp_tracker.npp
+
+        if not hasattr(evaluate_eskf, '_cage_center'):
+            evaluate_eskf._cage_center = current_npp_world.copy()
+        else:
+            evaluate_eskf._cage_center[0:2] = current_npp_world[0:2]
+            evaluate_eskf._cage_center[2]   = 0.999 * evaluate_eskf._cage_center[2] + 0.001 * current_npp_world[2]
+
+        head_vector = eskf_talos.position - evaluate_eskf._cage_center
+        distance = np.linalg.norm(head_vector)
+
+        if distance > 0.12:
+            eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * 0.12
+
     talos_positions = np.array(talos_positions)
     pure_positions  = np.array(pure_positions)
     evaluate_eskf._last_talos_pos = talos_positions
