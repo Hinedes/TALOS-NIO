@@ -33,6 +33,8 @@ from projectaria_tools.core import data_provider
 
 from SMLP import BigSpectralMLP as SpectralMLP
 from laid import LAIDBouncer
+from halo import HALOObserver
+from npp import NPPTracker
 from nymeria_loader import (load_sequence, load_imu_stream, align_imu_streams,
                             load_gt_trajectory, interpolate_gt,
                             SID_RIGHT, SID_LEFT, TARGET_HZ)
@@ -95,26 +97,31 @@ class ESKF:
         F[6:9, 9:12]  = -R * dt
         self.P = F @ self.P @ F.T + self.Q
 
-    def update_velocity(self, vel, R_obs):
-        """Phase 3: Slap gate removed. Neural aleatoric covariance R_obs is mandatory."""
+    def update_velocity(self, vel, R_obs, slap_threshold=3.0):
+        """ESKF velocity update with Mahalanobis Slap Gate (threshold=3.0)."""
         if not np.all(np.isfinite(vel)): return
         H = np.zeros((3, 15))
         H[0,3] = H[1,4] = H[2,5] = 1.0
-        
-        S  = H @ self.P @ H.T + R_obs
-        r  = vel - self.velocity
-        
-        # Robust matrix solve to prevent catastrophic conditioning failure
-        K = np.linalg.solve(S.T, (self.P @ H.T).T).T
-        
-        # OVERLORD QUARANTINE : neural predictions restricted to position + velocity only
-        # Orientation and biases (states 6:15) are zeroed at the gain level.
+
+        S     = H @ self.P @ H.T + R_obs
+        r     = vel - self.velocity
+        S_inv = np.linalg.inv(S)
+
+        # The Slap -- Mahalanobis innovation gate
+        mahal_sq = float(r @ S_inv @ r)
+        if mahal_sq > slap_threshold ** 2:
+            return  # slapped -- update silently rejected
+
+        # Reuse S_inv for Kalman gain (zero redundant computation)
+        K = self.P @ H.T @ S_inv
+
+        # OVERLORD QUARANTINE: orientation and biases zeroed at gain level
         K[6:15, :] = 0.0
-        
-        dx = np.clip(K @ r, -2.0, 2.0)
-        self.position    += dx[0:3]
-        self.velocity    += dx[3:6]
-        self.P  = (np.eye(15) - K @ H) @ self.P
+
+        dx = K @ r
+        self.position += dx[0:3]
+        self.velocity += dx[3:6]
+        self.P = (np.eye(15) - K @ H) @ self.P
 
     def update_zaru(self, gyro_raw):
         H = np.zeros((3, 15))
@@ -302,6 +309,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         e.orientation = init_rot.copy()
 
     laid_bouncer = LAIDBouncer()
+    npp_tracker  = NPPTracker()
+    halo = HALOObserver(init_rot)
     accel_buf, gyro_buf = [], []
     accel2_buf, gyro2_buf = [], []
     talos_positions, pure_positions = [], []
@@ -312,6 +321,10 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
         eskf_talos.predict(a, g)
         eskf_pure.predict(a, g)
+        # NPP update (tracking only, sphere clamp disabled)
+        v_device = eskf_talos.orientation.T @ eskf_talos.velocity
+        npp_tracker.update(g, v_device)
+        # HALO orientation cage disabled -- requires torso reference frame
 
         talos_positions.append(eskf_talos.position.copy())
         pure_positions.append(eskf_pure.position.copy())
