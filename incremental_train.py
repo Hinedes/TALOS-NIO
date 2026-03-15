@@ -13,6 +13,7 @@ Each round:
     7. Stop if neural loss stagnates over LOSS_PATIENCE rounds (dead model).
 """
 
+from bulwark import bulwark
 import argparse
 import json
 import shutil
@@ -355,6 +356,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 pred_delta, _, pred_cov = model(win_tensor.to(device))
 
             pred_delta_np = pred_delta.cpu().numpy()[0]
+            pred_delta_np = bulwark(pred_delta_np)
             pred_cov_np   = pred_cov.cpu().numpy()[0]
 
             # LAID veto
