@@ -104,5 +104,6 @@ if __name__ == "__main__":
     parser.add_argument("--ate",   type=float, required=True)
     parser.add_argument("--round", type=int,   required=True)
     parser.add_argument("--total", type=int,   required=True)
+    parser.add_argument("--run",   type=str,   default="unknown")
     args = parser.parse_args()
     log_run(args.ate, args.round, args.total)
