@@ -45,7 +45,7 @@ from nymeria_loader import (load_sequence, load_sequence_cached, load_imu_stream
 PATIENCE               = 15      # ESKF ATE strikes before halting (physical overfitting)
 LOSS_PATIENCE          = 20     # Loss stagnation strikes before halting (dead model)
 LOSS_MIN_DELTA         = 1e-5   # Minimum loss improvement to count as progress
-WARMUP_LOSS_THRESHOLD  = 0.010  # Don't run ESKF eval until loss drops below this
+WARMUP_LOSS_THRESHOLD  = 0.10   # Don't run ESKF eval until loss drops below this
 STORAGE_FLOOR_GB       = 30.0
 EPOCHS_PER_ROUND       = 20
 BATCH_SIZE             = 4096
@@ -147,6 +147,78 @@ class ESKF:
         
         self.P  = (np.eye(15) - K @ H) @ self.P
 
+    def update_cau(self, accel_raw, accel_var):
+        """Continuous Attitude Update: Observes gravity via raw accelerometer to correct pitch/roll.
+        
+        Only fires when linear acceleration is quiet (accel_var near zero),
+        so the accelerometer reading is dominated by the gravity vector.
+        R_cau scales with accel_var — noisier periods get weaker corrections.
+        """
+        # Conservative floor: even at perfect stillness, don't slam orientation.
+        R_cau = np.eye(3) * (1.0 + accel_var * 50.0)
+        
+        # Bias-corrected accelerometer reading
+        accel_corrected = accel_raw - self.ba
+        
+        # Expected accelerometer reading in body frame (specific force = -gravity)
+        # When stationary: accel reads -R^T @ g_world = R^T @ [0, 0, 9.81]
+        g_body_expected = -self.orientation.T @ self.gravity
+        
+        # Residual: what the accel actually reads vs what we expect
+        z = accel_corrected - g_body_expected
+        
+        H = np.zeros((3, 15))
+        # Orientation error observation (indices 6:9)
+        # Linearization: d(R^T @ g)/d(delta_theta) = [R^T @ g]_x = skew(g_body_expected)
+        H[0:3, 6:9] = self._skew(g_body_expected)
+        # Accelerometer bias observation (indices 12:15)
+        # The accel measurement includes -ba, so H for ba is -I
+        H[0:3, 12:15] = -np.eye(3)
+        
+        S = H @ self.P @ H.T + R_cau
+        
+        # Robust matrix solve
+        K = np.linalg.solve(S.T, (self.P @ H.T).T).T
+        
+        # CAU Quarantine: Only allow updates to orientation and accel bias
+        # Do not let accelerometer noise leak into position, velocity, or gyro bias
+        K[0:6, :] = 0.0
+        K[9:12, :] = 0.0
+        
+        dx = K @ z
+        
+        # Clamp orientation correction to prevent large jumps
+        dx[6:9] = np.clip(dx[6:9], -0.01, 0.01)
+        
+        # Apply orientation correction using SO(3) exponential map
+        self.orientation = self.orientation @ Rotation.from_rotvec(dx[6:9]).as_matrix()
+        # The Alpha Gate for accel bias: Dampen updates
+        self.ba += dx[12:15] * 0.05
+        
+        self.P = (np.eye(15) - K @ H) @ self.P
+
+            # DISABLED: def update_yaw_anchor(self, omega_yaw_obs, gyro_z_raw, trust):
+        """LAID yaw rate pseudo-measurement targeting gyro bias Z (index 11).
+        Residual is rate vs rate -- dimensionally consistent [rad/s].
+        ESKF propagates bg_z correction into orientation via F[6:9,9:12] coupling.
+        """
+        if trust < 0.15:
+            return  # weak signal, skip
+        H = np.zeros((1, 15))
+        H[0, 11] = 1.0  # observe gyro bias Z -- NOT orientation state
+        # Residual: LAID yaw rate vs bias-corrected gyro yaw [rad/s vs rad/s]
+        z = np.array([omega_yaw_obs - (gyro_z_raw - self.bg[2])])
+        R_yaw = np.array([[1.0 / (trust + 1e-6)]])
+        S = H @ self.P @ H.T + R_yaw
+        K = self.P @ H.T / S[0, 0]
+        # Isolate to gyro bias Z only
+        K_masked = np.zeros(15)
+        K_masked[11] = K[11]
+        dx = K_masked * z[0]
+        dx[11] = np.clip(dx[11], -0.01, 0.01)  # limit bias correction [rad/s]
+        self.bg[2] += dx[11]
+        self.P = (np.eye(15) - np.outer(K_masked, H[0])) @ self.P
+
 # Data Pipeline
 def accumulate(existing: dict | None, new: dict) -> dict:
     if existing is None: return {k: v.copy() for k, v in new.items()}
@@ -234,15 +306,14 @@ def download_sequence(seq_id: str, entry: dict, root: Path) -> Path | None:
 def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpoint_path):
     X_tr, T_tr, Q_tr = make_tensors(train_data, device)
     X_va, T_va, Q_va = make_tensors(val_data,   device)
-    loader = DataLoader(TensorDataset(X_tr, T_tr, Q_tr), batch_size=BATCH_SIZE, shuffle=True)
+    loader = DataLoader(TensorDataset(X_tr, T_tr, Q_tr), batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
     best_val, t_losses = float('inf'), []
 
     def loss_fn(pt, pq, pcov, gt, gq):
-        # Phase 2: Gaussian Negative Log-Likelihood for translation + aleatoric uncertainty
-        pcov_c = torch.clamp(pcov, min=-4.0, max=4.0)
-        nll_trans = 0.5 * (torch.exp(-pcov_c) * (gt - pt)**2 + pcov_c)
-        lt = nll_trans.sum(dim=1).mean()
+        # Pure MSE for translation — covariance head is unused since eval uses static R_obs.
+        # This eliminates the Gaussian covariance collapse at the source.
+        lt = F.mse_loss(pt, gt)
         
         # Standard cosine-like loss for quaternion orientation
         lq = 1.0 - (pq * gq).sum(dim=1).abs().mean()
@@ -287,10 +358,17 @@ def set_axes_equal(ax):
 def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                   device, round_idx, plot_dir: Path, max_seconds=9999) -> float:
     """Runs the trained model through the physical ESKF and returns mean ATE."""
+    
+    # CRITICAL: Clear stale state from previous rounds
+    if hasattr(evaluate_eskf, '_cage_center'):
+        del evaluate_eskf._cage_center
+        
     dt          = ESKF_DT
     max_samples = int(max_seconds / dt)
     df          = df.iloc[:max_samples].reset_index(drop=True)
 
+    if hasattr(evaluate_eskf, "_cage_center"):
+        del evaluate_eskf._cage_center
     eskf_talos = ESKF(dt=dt, gravity=true_gravity)
     eskf_pure  = ESKF(dt=dt, gravity=true_gravity)
     model.eval()
@@ -320,9 +398,11 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
     for step in range(len(df)):
         a, g = accel[step], gyro[step]
+        a2_sample = accel2[step]
 
-        eskf_talos.predict(a, g)
-        eskf_pure.predict(a, g)
+        # LAID fast loop gate (TALOS only): veto physically impossible samples
+        eskf_talos.predict(a, g)  # fast loop ungated -- check_sample fires on footstrikes
+        eskf_pure.predict(a, g)  # Pure IMU stays ungated for honest comparison
         # NPP update (tracking only, sphere clamp disabled)
         v_device = eskf_talos.orientation.T @ eskf_talos.velocity
         npp_tracker.update(g, v_device)
@@ -368,8 +448,13 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             laid_veto, laid_rms = laid_bouncer.check(win1, win2)
             if not laid_veto:
                 v_world = eskf_talos.orientation @ (pred_delta_np / window_time)
-                R_obs_dynamic = np.diag(np.clip(np.exp(pred_cov_np), 1e-3, None))
-                eskf_talos.update_velocity(v_world, R_obs=R_obs_dynamic)
+                # Ignore pred_cov_np to prevent Gaussian Covariance Collapse.
+                R_obs_static = np.eye(3) * 0.1
+                eskf_talos.update_velocity(v_world, R_obs=R_obs_static)
+
+            # LAID yaw anchor -- physics-based yaw correction, independent of Overlord
+            omega_yaw, yaw_trust, omega_mag = laid_bouncer.yaw_anchor(win1, win2)
+            # DISABLED: eskf_talos.update_yaw_anchor(omega_yaw, gyro[-1, 2], yaw_trust)
 
         # ZARU (TALOS only)
         if len(gyro_buf) >= ZARU_WINDOW and step % ZARU_WINDOW == 0:
@@ -381,6 +466,18 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 eskf_talos.update_zaru(g)
                 # Hardcoded low noise for verified zero-velocity updates
                 eskf_talos.update_velocity(np.zeros(3), R_obs=np.eye(3) * 1e-4)
+
+        # CAU - Continuous Attitude Update (TALOS only)
+        # Piggybacks on ZARU's stillness detection: only fire when the user is
+        # near-stationary (both gyro AND accel variance confirm stillness).
+        # During walking, the accelerometer is NOT a gravity sensor -- it measures
+        # footstrike impacts and head bob. CAU must NOT fire during motion.
+        if len(gyro_buf) >= ZARU_WINDOW and step % ZARU_WINDOW == 0:
+            gyro_var_cau = np.var(np.array(gyro_buf[-ZARU_WINDOW:]), axis=0).sum()
+            accel_var_cau = np.var(np.array(accel_buf[-ZARU_WINDOW:]), axis=0).sum()
+            # Strictest threshold: match ZARU exactly.
+            if gyro_var_cau < ZARU_THRESHOLD and accel_var_cau < ZARU_ACCEL_THRESHOLD:
+                eskf_talos.update_cau(a, accel_var_cau)
 
 
         # ---------------------------------------------------------

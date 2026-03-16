@@ -23,4 +23,9 @@ golden_val.npy
 *.feather
 *.log
 *.pdf
-*.png.env
+*.png
+*.env
+*.txt
+golden/
+pictures/
+talos_skill/

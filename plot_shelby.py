@@ -15,7 +15,14 @@ ckpt   = torch.load('/mnt/c/TALOS/golden/talos_best_physical.pth', map_location=
 model.load_state_dict(ckpt)
 
 val_path = Path('/mnt/c/TALOS/nymeria/Nymeria_v0.0_20230608_s0_shelby_arroyo_act0_3ciwl8_recording_head/recording_head')
-df, gravity = load_continuous_val_stream(val_path)
+import pickle
+_cache = Path('/mnt/c/TALOS/golden/cache') / f'{val_path.parent.name}_val_stream.pkl'
+if _cache.exists():
+    print(f'[cache] HIT val_stream')
+    df, gravity = pickle.load(open(_cache, 'rb'))
+else:
+    print(f'[cache] MISS -- reading VRS (slow)')
+    df, gravity = load_continuous_val_stream(val_path)
 
 MAX_SECONDS = 300
 print(f'Running evaluate_eskf ({MAX_SECONDS}s)...')

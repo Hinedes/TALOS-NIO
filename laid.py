@@ -52,6 +52,43 @@ class LAIDBouncer:
         self.r         = lever_arm.copy()
         self.threshold = threshold
         self.dt        = dt
+        self._prev_gyro = None  # For fast loop angular acceleration estimate
+
+
+    def check_sample(self, a1, g1, a2, threshold_scale=3.0):
+        """Per-sample LAID check for the fast loop.
+        
+        Compares instantaneous accel differential (a2 - a1) against
+        predicted differential from lever arm kinematics using current gyro.
+        
+        Args:
+            a1 : (3,) accel IMU1 (right)
+            g1 : (3,) gyro IMU1 (right)
+            a2 : (3,) accel IMU2 (left)
+            threshold_scale : multiplier on self.threshold for per-sample noise
+        
+        Returns:
+            veto (bool): True = this sample is physically inconsistent, coast.
+        """
+        # Estimate angular acceleration from consecutive gyro samples
+        if self._prev_gyro is None:
+            self._prev_gyro = g1.copy()
+            return False  # Can't check first sample
+        
+        alpha = (g1 - self._prev_gyro) / self.dt
+        self._prev_gyro = g1.copy()
+        
+        # Predicted differential: a_diff = ω × (ω × r) + α × r
+        a_diff_pred = self._predict_diff(g1.astype(np.float64), alpha.astype(np.float64))
+        
+        # Measured differential
+        a_diff_meas = (a2 - a1).astype(np.float64)
+        
+        # Residual magnitude
+        residual = np.linalg.norm(a_diff_meas - a_diff_pred)
+        
+        # Per-sample is noisier than window RMS, so use a scaled threshold
+        return residual > self.threshold * threshold_scale
 
     def _predict_diff(self, omega, alpha):
         """
