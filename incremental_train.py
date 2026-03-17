@@ -68,6 +68,9 @@ ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
 SLAP_THRESHOLD       = 2.5
 R_OBS_MIN_DIAG       = 0.05
 R_OBS_MAX_DIAG       = 0.30
+USE_DYNAMIC_R_OBS    = False
+R_OBS_FIXED_DIAG     = 0.05
+PRED_VEL_GAIN        = 1.75
 
 # Yaw-drift intervention (evaluation-time, conservative)
 ENABLE_YAW_ANCHOR        = False
@@ -444,6 +447,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     diag_yaw_err_deg  = []
     diag_update_rows  = []
     diag_step_rows    = []
+    diag_innov_norm   = []
+    diag_pred_speed   = []
+    diag_gt_speed     = []
 
     for step in range(len(df)):
         a, g = accel[step], gyro[step]
@@ -496,7 +502,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 pred_vel, pred_cov = model(win_tensor.to(device))
 
             # The network outputs mean velocity (m/s), NOT displacement.
-            pred_vel_local = pred_vel.cpu().numpy()[0]
+            pred_vel_local_raw = pred_vel.cpu().numpy()[0]
+            pred_vel_local = pred_vel_local_raw * PRED_VEL_GAIN
             pred_vel_local = bulwark(pred_vel_local)
             pred_cov_np    = pred_cov.cpu().numpy()[0]
 
@@ -529,11 +536,16 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 v_world = eskf_talos.orientation @ pred_vel_local
                 pred_var = np.exp(pred_cov_np)
                 r_obs_diag = np.clip(pred_var, R_OBS_MIN_DIAG, R_OBS_MAX_DIAG)
-                R_obs_dynamic = np.diag(r_obs_diag.astype(np.float64))
+                if USE_DYNAMIC_R_OBS:
+                    R_obs_used = np.diag(r_obs_diag.astype(np.float64))
+                else:
+                    R_obs_used = np.eye(3) * R_OBS_FIXED_DIAG
+                    r_obs_diag = np.array([R_OBS_FIXED_DIAG] * 3, dtype=np.float64)
                 neural_updates += 1
+                innovation_norm = float(np.linalg.norm(v_world - eskf_talos.velocity))
                 accepted, mahal_sq = eskf_talos.update_velocity(
                     v_world,
-                    R_obs=R_obs_dynamic,
+                    R_obs=R_obs_used,
                     slap_threshold=SLAP_THRESHOLD,
                 )
                 if accepted is False:
@@ -568,6 +580,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 
                 diag_pred_std.append(current_std)
                 diag_abs_error.append(current_err)
+                diag_innov_norm.append(innovation_norm)
+                diag_pred_speed.append(float(np.linalg.norm(pred_v_local)))
+                diag_gt_speed.append(float(np.linalg.norm(gt_v_local)))
 
                 diag_update_rows.append({
                     'step_idx': step,
@@ -579,6 +594,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'pred_vx': float(pred_v_local[0]),
                     'pred_vy': float(pred_v_local[1]),
                     'pred_vz': float(pred_v_local[2]),
+                    'pred_vx_raw': float(pred_vel_local_raw[0]),
+                    'pred_vy_raw': float(pred_vel_local_raw[1]),
+                    'pred_vz_raw': float(pred_vel_local_raw[2]),
                     'gt_vx': float(gt_v_local[0]),
                     'gt_vy': float(gt_v_local[1]),
                     'gt_vz': float(gt_v_local[2]),
@@ -608,6 +626,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'pred_vx': float(pred_vel_local[0]),
                     'pred_vy': float(pred_vel_local[1]),
                     'pred_vz': float(pred_vel_local[2]),
+                    'pred_vx_raw': float(pred_vel_local_raw[0]),
+                    'pred_vy_raw': float(pred_vel_local_raw[1]),
+                    'pred_vz_raw': float(pred_vel_local_raw[2]),
                     'gt_vx': None,
                     'gt_vy': None,
                     'gt_vz': None,
@@ -779,9 +800,16 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'yaw_err_p95_deg': float(np.percentile(diag_yaw_err_deg, 95)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_max_deg': float(np.max(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'mahal_p95': float(np.percentile(diag_mahal_sq, 95)) if len(diag_mahal_sq) > 0 else 0.0,
+        'innovation_norm_p95': float(np.percentile(diag_innov_norm, 95)) if len(diag_innov_norm) > 0 else 0.0,
+        'pred_speed_mean': float(np.mean(diag_pred_speed)) if len(diag_pred_speed) > 0 else 0.0,
+        'gt_speed_mean': float(np.mean(diag_gt_speed)) if len(diag_gt_speed) > 0 else 0.0,
+        'pred_gt_speed_ratio': float(np.mean(diag_pred_speed) / (np.mean(diag_gt_speed) + 1e-6)) if len(diag_gt_speed) > 0 else 0.0,
         'slap_threshold': float(SLAP_THRESHOLD),
         'r_obs_min_diag': float(R_OBS_MIN_DIAG),
         'r_obs_max_diag': float(R_OBS_MAX_DIAG),
+        'use_dynamic_r_obs': bool(USE_DYNAMIC_R_OBS),
+        'r_obs_fixed_diag': float(R_OBS_FIXED_DIAG),
+        'pred_vel_gain': float(PRED_VEL_GAIN),
         'yaw_anchor_min_trust': float(YAW_ANCHOR_MIN_TRUST),
         'yaw_anchor_max_omega_mag': float(YAW_ANCHOR_MAX_OMEGA_MAG),
         'yaw_anchor_max_laid_rms': float(YAW_ANCHOR_MAX_LAID_RMS),
