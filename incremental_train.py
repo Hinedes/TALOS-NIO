@@ -127,9 +127,14 @@ class ESKF:
         r     = vel - self.velocity
         S_inv = np.linalg.inv(S)
 
-        # The Slap -- Mahalanobis innovation gate
-        mahal_sq = float(r @ S_inv @ r)
-        if mahal_sq > slap_threshold ** 2:
+        # The Slap -- dual innovation gate:
+        # 1) state-covariance-aware Mahalanobis (classic)
+        # 2) R-only Mahalanobis (prevents covariance inflation from nullifying gate tension)
+        mahal_state_sq = float(r @ S_inv @ r)
+        R_inv = np.linalg.inv(R_obs)
+        mahal_r_sq = float(r @ R_inv @ r)
+        mahal_sq = max(mahal_state_sq, mahal_r_sq)
+        if (mahal_state_sq > slap_threshold ** 2) or (mahal_r_sq > slap_threshold ** 2):
             return False, mahal_sq  # slapped -- update silently rejected
 
         # Reuse S_inv for Kalman gain (zero redundant computation)
@@ -439,6 +444,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
     # Lens 2: Filter Tension
     diag_mahal_sq     = []
+    diag_mahal_r_sq   = []
     diag_v_gt_mag     = []
 
     # Lens 3: Covariance Shadowing
@@ -571,6 +577,10 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 diag_v_pred_local.append(pred_v_local)
                 diag_v_gt_local.append(gt_v_local)
                 diag_mahal_sq.append(mahal_sq)
+                r = v_world - eskf_talos.velocity
+                R_inv = np.linalg.inv(R_obs_used)
+                mahal_r_sq = float(r @ R_inv @ r)
+                diag_mahal_r_sq.append(mahal_r_sq)
                 diag_v_gt_mag.append(np.linalg.norm(gt_v_local))
                 
                 # --- Capture Lens 3: Covariance Shadowing ---
@@ -590,6 +600,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'laid_residual_rms': float(laid_rms),
                     'slap_accepted': bool(accepted),
                     'mahal_sq': float(mahal_sq),
+                    'mahal_r_sq': float(mahal_r_sq),
                     'gt_speed_mps': float(np.linalg.norm(gt_v_local)),
                     'pred_vx': float(pred_v_local[0]),
                     'pred_vy': float(pred_v_local[1]),
@@ -622,6 +633,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'laid_residual_rms': float(laid_rms),
                     'slap_accepted': None,
                     'mahal_sq': None,
+                    'mahal_r_sq': None,
                     'gt_speed_mps': None,
                     'pred_vx': float(pred_vel_local[0]),
                     'pred_vy': float(pred_vel_local[1]),
@@ -800,6 +812,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'yaw_err_p95_deg': float(np.percentile(diag_yaw_err_deg, 95)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_max_deg': float(np.max(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'mahal_p95': float(np.percentile(diag_mahal_sq, 95)) if len(diag_mahal_sq) > 0 else 0.0,
+        'mahal_r_p95': float(np.percentile(diag_mahal_r_sq, 95)) if len(diag_mahal_r_sq) > 0 else 0.0,
         'innovation_norm_p95': float(np.percentile(diag_innov_norm, 95)) if len(diag_innov_norm) > 0 else 0.0,
         'pred_speed_mean': float(np.mean(diag_pred_speed)) if len(diag_pred_speed) > 0 else 0.0,
         'gt_speed_mean': float(np.mean(diag_gt_speed)) if len(diag_gt_speed) > 0 else 0.0,
