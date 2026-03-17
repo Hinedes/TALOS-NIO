@@ -65,7 +65,7 @@ ZARU_THRESHOLD       = 1e-4
 ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
 
 # Evaluation fusion tuning profile (safe test preset)
-SLAP_THRESHOLD       = 1.6
+SLAP_THRESHOLD       = 2.0
 R_OBS_MIN_DIAG       = 0.05
 R_OBS_MAX_DIAG       = 0.30
 USE_DYNAMIC_R_OBS    = False
@@ -73,8 +73,8 @@ R_OBS_FIXED_DIAG     = 0.10
 PRED_VEL_GAIN        = 1.00
 
 # Catastrophic divergence safeguards
-MAX_PRED_WORLD_SPEED_MPS = 3.0
-MAX_INNOVATION_NORM_MPS  = 5.0
+MAX_PRED_WORLD_SPEED_MPS = 6.0
+MAX_INNOVATION_NORM_MPS  = 8.0
 CAT_ATE_ABS_M            = 100.0
 CAT_ATE_BEST_MULT        = 8.0
 
@@ -813,6 +813,13 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     if cage_clamp_count > 0:
         print(f"  [The Cage]  Head severed {cage_clamp_count}/{len(df)} frames ({cage_clamp_rate:.1f}%)")
 
+    def _p95_finite(values):
+        arr = np.asarray(values, dtype=np.float64)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return 0.0
+        return float(np.percentile(arr, 95))
+
     pure_imu_ate = float(np.linalg.norm(pure_positions - gt_pos, axis=1).mean())
     summary_row = {
         'mean_ate_m': float(mean_ate),
@@ -835,9 +842,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'yaw_err_mean_deg': float(np.mean(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_p95_deg': float(np.percentile(diag_yaw_err_deg, 95)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_max_deg': float(np.max(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
-        'mahal_p95': float(np.percentile(diag_mahal_sq, 95)) if len(diag_mahal_sq) > 0 else 0.0,
-        'mahal_r_p95': float(np.percentile(diag_mahal_r_sq, 95)) if len(diag_mahal_r_sq) > 0 else 0.0,
-        'innovation_norm_p95': float(np.percentile(diag_innov_norm, 95)) if len(diag_innov_norm) > 0 else 0.0,
+        'mahal_p95': _p95_finite(diag_mahal_sq),
+        'mahal_r_p95': _p95_finite(diag_mahal_r_sq),
+        'innovation_norm_p95': _p95_finite(diag_innov_norm),
         'pred_speed_mean': float(np.mean(diag_pred_speed)) if len(diag_pred_speed) > 0 else 0.0,
         'gt_speed_mean': float(np.mean(diag_gt_speed)) if len(diag_gt_speed) > 0 else 0.0,
         'pred_gt_speed_ratio': float(np.mean(diag_pred_speed) / (np.mean(diag_gt_speed) + 1e-6)) if len(diag_gt_speed) > 0 else 0.0,
@@ -1035,17 +1042,28 @@ def main():
             break
 
     print(f"\n:: Training Complete ::")
-    print(f"   Best ATE : {best_ate_ever:.3f}m")
-    print(f"   Achieved : Round {best_ate_round}")
-    print(f"   Checkpoint : golden/talos_best_physical.pth")
+    if np.isfinite(best_ate_ever) and best_ate_round > 0:
+        print(f"   Best ATE : {best_ate_ever:.3f}m")
+        print(f"   Achieved : Round {best_ate_round}")
+        print(f"   Checkpoint : golden/talos_best_physical.pth")
+        status_msg = f"TALOS done. Best ATE: {best_ate_ever:.3f}m @ Round {best_ate_round}/{round_idx}"
+        notion_ate = str(round(best_ate_ever, 3))
+        notion_round = str(best_ate_round)
+    else:
+        print("   Best ATE : N/A (no valid physical checkpoint this run)")
+        print("   Achieved : N/A")
+        print("   Checkpoint : N/A")
+        status_msg = f"TALOS done. No valid physical checkpoint in run {run_dir.name}."
+        notion_ate = "nan"
+        notion_round = "-1"
     import subprocess
     subprocess.run(["curl", "-s", "-d",
-        f"TALOS done. Best ATE: {best_ate_ever:.3f}m @ Round {best_ate_round}/{round_idx}",
+        status_msg,
         "ntfy.sh/talos-aman-lab"], capture_output=True)
     import subprocess
     subprocess.run(["python3", "notion_logger.py",
-        "--ate",   str(round(best_ate_ever, 3)),
-        "--round", str(best_ate_round),
+        "--ate",   notion_ate,
+        "--round", notion_round,
         "--total", str(round_idx),
         "--run", run_dir.name],
         cwd="/mnt/c/TALOS")
