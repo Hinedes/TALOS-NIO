@@ -44,11 +44,11 @@ from telemetry import generate_diagnostic_dashboard
 
 # Configuration
 PATIENCE               = 15      # ESKF ATE strikes before halting (physical overfitting)
-LOSS_PATIENCE          = 20     # Loss stagnation strikes before halting (dead model)
+LOSS_PATIENCE          = 10     # Loss stagnation strikes before halting (dead model)
 LOSS_MIN_DELTA         = 1e-5   # Minimum loss improvement to count as progress
 WARMUP_LOSS_THRESHOLD  = 1.0    # Don't run ESKF eval until loss drops below this
 STORAGE_FLOOR_GB       = 50.0
-EPOCHS_PER_ROUND       = 20
+EPOCHS_PER_ROUND       = 50
 BATCH_SIZE             = 4096
 VAL_SUBJECT            = 'shelby_arroyo'  # 63m locomotion stress test
 
@@ -231,7 +231,8 @@ def to_raw(imu_windows: np.ndarray) -> np.ndarray:
     return imu_windows.transpose(0, 2, 1).astype(np.float32)
 
 def make_tensors(data: dict, device: torch.device):
-    X = torch.from_numpy(to_raw(data['imu1_features'])).to(device)
+    # The "Turn Up the Volume" hack: multiply IMU data by 100
+    X = torch.from_numpy(to_raw(data['imu1_features']) * 100.0).to(device)
     T = torch.from_numpy(data['trans']).to(device)
     Q = torch.from_numpy(data['quat']).to(device)
     return X, T, Q
@@ -313,14 +314,15 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
     best_val, t_losses = float('inf'), []
 
     def loss_fn(pt, pcov, gt):
-        # Pure MSE for translation — covariance head was previously dead.
-        lt = F.mse_loss(pt, gt)
+        # The "Speed Tax": dynamically weight loss by motion magnitude
+        gt_mag = torch.norm(gt, dim=1, keepdim=True)
+        # Weight scales linearly with speed: stationary=1x, 1.5m/s walk ~ 8.5x
+        weight = 1.0 + 5.0 * gt_mag 
         
-        # NLL auxiliary loss strictly to force network to calibrate its uncertainty for Lens 3.
-        # This keeps the physical ESKF update using static R_obs stable.
-        l_nll = F.gaussian_nll_loss(pt, gt, torch.exp(pcov), full=False)
+        error_sq = (pt - gt) ** 2
+        weighted_error_sq = weight * error_sq
         
-        return lt + 0.1 * l_nll
+        return torch.mean(weighted_error_sq)
 
     for epoch in range(epochs):
         model.train()
@@ -400,6 +402,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
     slap_count = 0
     neural_updates = 0
+    cage_clamp_count = 0
 
     # --- Diagnostic Lens Buffers ---
     # Lens 1: Scale Collapse
@@ -449,7 +452,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             win_accel_corrected = win_accel
             
             win = np.concatenate([win_accel_corrected, win_gyro], axis=-1)
-            win_tensor = torch.tensor(win.T[np.newaxis], dtype=torch.float32)  # (1, 6, 64)
+            # The "Turn Up the Volume" hack for evaluation inference
+            win_tensor = torch.tensor((win * 100.0).T[np.newaxis], dtype=torch.float32)  # (1, 6, 64)
 
             with torch.no_grad():
                 pred_delta, pred_cov = model(win_tensor.to(device))
@@ -466,8 +470,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             laid_veto, laid_rms = laid_bouncer.check(win1, win2)
             if not laid_veto:
                 v_world = eskf_talos.orientation @ pred_delta_np
-                # Ignore pred_cov_np to prevent Gaussian Covariance Collapse.
-                R_obs_static = np.eye(3) * 0.01
+                # "Healthy Skepticism": increased R_obs from 0.01 to 0.1
+                R_obs_static = np.eye(3) * 0.1
                 neural_updates += 1
                 accepted, mahal_sq = eskf_talos.update_velocity(v_world, R_obs=R_obs_static)
                 if accepted is False:
@@ -547,6 +551,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
         if distance > 0.12:
             eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * 0.12
+            cage_clamp_count += 1
 
     talos_positions = np.array(talos_positions)
     pure_positions  = np.array(pure_positions)
@@ -592,6 +597,10 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                                       diag_v_gt_mag, diag_pred_std, diag_abs_error, round_idx, plot_dir)
         slap_rate = (slap_count / neural_updates) * 100
         print(f"  [Slap Gate] {slap_count}/{neural_updates} updates rejected ({slap_rate:.1f}%)")
+        
+    cage_clamp_rate = (cage_clamp_count / len(df)) * 100
+    if cage_clamp_count > 0:
+        print(f"  [The Cage]  Head severed {cage_clamp_count}/{len(df)} frames ({cage_clamp_rate:.1f}%)")
 
     return mean_ate
 
