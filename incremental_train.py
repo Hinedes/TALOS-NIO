@@ -68,6 +68,12 @@ ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
 SLAP_THRESHOLD       = 4.0
 R_OBS_STATIC_DIAG    = 0.2
 
+# Yaw-drift intervention (evaluation-time, conservative)
+ENABLE_YAW_ANCHOR        = True
+YAW_ANCHOR_MIN_TRUST     = 0.35
+YAW_ANCHOR_MAX_OMEGA_MAG = 4.0
+YAW_ANCHOR_MAX_LAID_RMS  = 0.6
+
 # ESKF Physics Engine
 class ESKF:
     def __init__(self, dt=0.01, gravity=None):
@@ -213,7 +219,7 @@ class ESKF:
         ESKF propagates bg_z correction into orientation via F[6:9,9:12] coupling.
         """
         if trust < 0.15:
-            return  # weak signal, skip
+            return False  # weak signal, skip
         H = np.zeros((1, 15))
         H[0, 11] = 1.0  # observe gyro bias Z -- NOT orientation state
         # Residual: LAID yaw rate vs bias-corrected gyro yaw [rad/s vs rad/s]
@@ -228,6 +234,7 @@ class ESKF:
         dx[11] = np.clip(dx[11], -0.01, 0.01)  # limit bias correction [rad/s]
         self.bg[2] += dx[11]
         self.P = (np.eye(15) - np.outer(K_masked, H[0])) @ self.P
+        return True
 
 # Data Pipeline
 def accumulate(existing: dict | None, new: dict) -> dict:
@@ -419,6 +426,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     laid_veto_count = 0
     zaru_fire_count = 0
     cau_fire_count = 0
+    yaw_anchor_fire_count = 0
 
     # --- Diagnostic Lens Buffers ---
     # Lens 1: Scale Collapse
@@ -498,6 +506,24 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             win1       = np.concatenate([win_accel_corrected, win_gyro], axis=-1)
             laid_veto, laid_rms = laid_bouncer.check(win1, win2)
             if not laid_veto:
+                # Optional conservative dynamic yaw anchor (LAID-based)
+                yaw_anchor_applied = False
+                if ENABLE_YAW_ANCHOR:
+                    omega_yaw, yaw_trust, omega_mag = laid_bouncer.yaw_anchor(win1, win2)
+                    current_mean_gyro_z = float(np.mean(win_gyro[:, 2]))
+                    if (
+                        yaw_trust >= YAW_ANCHOR_MIN_TRUST
+                        and omega_mag <= YAW_ANCHOR_MAX_OMEGA_MAG
+                        and laid_rms <= YAW_ANCHOR_MAX_LAID_RMS
+                    ):
+                        yaw_anchor_applied = eskf_talos.update_yaw_anchor(
+                            omega_yaw,
+                            current_mean_gyro_z,
+                            yaw_trust,
+                        )
+                        if yaw_anchor_applied:
+                            yaw_anchor_fire_count += 1
+
                 # Direct rotation from local velocity to world velocity
                 v_world = eskf_talos.orientation @ pred_vel_local
                 R_obs_static = np.eye(3) * R_OBS_STATIC_DIAG
@@ -559,6 +585,10 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'abs_err_x': float(current_err[0]),
                     'abs_err_y': float(current_err[1]),
                     'abs_err_z': float(current_err[2]),
+                    'yaw_anchor_applied': bool(yaw_anchor_applied),
+                    'omega_yaw_obs': float(omega_yaw) if ENABLE_YAW_ANCHOR else None,
+                    'yaw_trust': float(yaw_trust) if ENABLE_YAW_ANCHOR else None,
+                    'omega_mag': float(omega_mag) if ENABLE_YAW_ANCHOR else None,
                 })
             else:
                 laid_veto_count += 1
@@ -581,13 +611,11 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'abs_err_x': None,
                     'abs_err_y': None,
                     'abs_err_z': None,
+                    'yaw_anchor_applied': False,
+                    'omega_yaw_obs': None,
+                    'yaw_trust': None,
+                    'omega_mag': None,
                 })
-
-            # KILL THIS: LAID is mathematically flawed in rotating frames
-            # omega_yaw, yaw_trust, omega_mag = laid_bouncer.yaw_anchor(win1, win2)
-            # Compare average physical yaw rate vs average sensor yaw rate
-            # current_mean_gyro_z = np.mean(win_gyro[:, 2])
-            # eskf_talos.update_yaw_anchor(omega_yaw, current_mean_gyro_z, yaw_trust)
         # ZARU (TALOS only)
         if len(gyro_buf) >= ZARU_WINDOW and step % ZARU_WINDOW == 0:
             gyro_var = np.var(np.array(gyro_buf[-ZARU_WINDOW:]), axis=0).sum()
@@ -713,6 +741,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             f"p95={np.percentile(yaw_err, 95):.2f}° "
             f"max={np.max(yaw_err):.2f}°"
         )
+        if ENABLE_YAW_ANCHOR:
+            print(f"  [Yaw Anchor] applied {yaw_anchor_fire_count} times")
         
     cage_clamp_rate = (cage_clamp_count / len(df)) * 100
     if cage_clamp_count > 0:
@@ -734,11 +764,16 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'laid_veto_rate_pct': float((laid_veto_count / max(neural_updates + laid_veto_count, 1)) * 100.0),
         'zaru_fire_count': int(zaru_fire_count),
         'cau_fire_count': int(cau_fire_count),
+        'yaw_anchor_enabled': bool(ENABLE_YAW_ANCHOR),
+        'yaw_anchor_fire_count': int(yaw_anchor_fire_count),
         'yaw_err_mean_deg': float(np.mean(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_p95_deg': float(np.percentile(diag_yaw_err_deg, 95)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_max_deg': float(np.max(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'slap_threshold': float(SLAP_THRESHOLD),
         'r_obs_static_diag': float(R_OBS_STATIC_DIAG),
+        'yaw_anchor_min_trust': float(YAW_ANCHOR_MIN_TRUST),
+        'yaw_anchor_max_omega_mag': float(YAW_ANCHOR_MAX_OMEGA_MAG),
+        'yaw_anchor_max_laid_rms': float(YAW_ANCHOR_MAX_LAID_RMS),
     }
     csv_path = append_eval_csv(plot_dir, round_idx, summary_row, diag_step_rows, diag_update_rows)
     print(f"  [CSV]       telemetry appended -> {csv_path}")
