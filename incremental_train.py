@@ -65,7 +65,7 @@ ZARU_THRESHOLD       = 1e-4
 ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
 
 # Evaluation fusion tuning profile (safe test preset)
-SLAP_THRESHOLD       = 2.5
+SLAP_THRESHOLD       = 1.6
 R_OBS_MIN_DIAG       = 0.05
 R_OBS_MAX_DIAG       = 0.30
 USE_DYNAMIC_R_OBS    = False
@@ -555,8 +555,11 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     R_obs_used = np.eye(3) * R_OBS_FIXED_DIAG
                     r_obs_diag = np.array([R_OBS_FIXED_DIAG] * 3, dtype=np.float64)
                 neural_updates += 1
-                innovation_norm = float(np.linalg.norm(v_world - eskf_talos.velocity))
+                residual_pre = v_world - eskf_talos.velocity
+                innovation_norm = float(np.linalg.norm(residual_pre))
                 pred_world_speed = float(np.linalg.norm(v_world))
+                R_inv = np.linalg.inv(R_obs_used)
+                mahal_r_sq = float(residual_pre @ R_inv @ residual_pre)
 
                 # Hard safety gate before Kalman update to prevent catastrophic injections
                 if (pred_world_speed > MAX_PRED_WORLD_SPEED_MPS) or (innovation_norm > MAX_INNOVATION_NORM_MPS):
@@ -592,9 +595,6 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 diag_v_pred_local.append(pred_v_local)
                 diag_v_gt_local.append(gt_v_local)
                 diag_mahal_sq.append(mahal_sq)
-                r = v_world - eskf_talos.velocity
-                R_inv = np.linalg.inv(R_obs_used)
-                mahal_r_sq = float(r @ R_inv @ r)
                 diag_mahal_r_sq.append(mahal_r_sq)
                 diag_v_gt_mag.append(np.linalg.norm(gt_v_local))
                 
