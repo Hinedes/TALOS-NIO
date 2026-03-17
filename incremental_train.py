@@ -65,8 +65,9 @@ ZARU_THRESHOLD       = 1e-4
 ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
 
 # Evaluation fusion tuning profile (safe test preset)
-SLAP_THRESHOLD       = 4.0
-R_OBS_STATIC_DIAG    = 0.2
+SLAP_THRESHOLD       = 3.5
+R_OBS_MIN_DIAG       = 0.2
+R_OBS_MAX_DIAG       = 1.0
 
 # Yaw-drift intervention (evaluation-time, conservative)
 ENABLE_YAW_ANCHOR        = False
@@ -526,11 +527,13 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
 
                 # Direct rotation from local velocity to world velocity
                 v_world = eskf_talos.orientation @ pred_vel_local
-                R_obs_static = np.eye(3) * R_OBS_STATIC_DIAG
+                pred_var = np.exp(pred_cov_np)
+                r_obs_diag = np.clip(pred_var, R_OBS_MIN_DIAG, R_OBS_MAX_DIAG)
+                R_obs_dynamic = np.diag(r_obs_diag.astype(np.float64))
                 neural_updates += 1
                 accepted, mahal_sq = eskf_talos.update_velocity(
                     v_world,
-                    R_obs=R_obs_static,
+                    R_obs=R_obs_dynamic,
                     slap_threshold=SLAP_THRESHOLD,
                 )
                 if accepted is False:
@@ -582,6 +585,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'pred_std_x': float(current_std[0]),
                     'pred_std_y': float(current_std[1]),
                     'pred_std_z': float(current_std[2]),
+                    'r_obs_x': float(r_obs_diag[0]),
+                    'r_obs_y': float(r_obs_diag[1]),
+                    'r_obs_z': float(r_obs_diag[2]),
                     'abs_err_x': float(current_err[0]),
                     'abs_err_y': float(current_err[1]),
                     'abs_err_z': float(current_err[2]),
@@ -608,6 +614,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'pred_std_x': float(np.exp(pred_cov_np[0] / 2.0)),
                     'pred_std_y': float(np.exp(pred_cov_np[1] / 2.0)),
                     'pred_std_z': float(np.exp(pred_cov_np[2] / 2.0)),
+                    'r_obs_x': None,
+                    'r_obs_y': None,
+                    'r_obs_z': None,
                     'abs_err_x': None,
                     'abs_err_y': None,
                     'abs_err_z': None,
@@ -770,7 +779,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'yaw_err_p95_deg': float(np.percentile(diag_yaw_err_deg, 95)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_max_deg': float(np.max(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'slap_threshold': float(SLAP_THRESHOLD),
-        'r_obs_static_diag': float(R_OBS_STATIC_DIAG),
+        'r_obs_min_diag': float(R_OBS_MIN_DIAG),
+        'r_obs_max_diag': float(R_OBS_MAX_DIAG),
         'yaw_anchor_min_trust': float(YAW_ANCHOR_MIN_TRUST),
         'yaw_anchor_max_omega_mag': float(YAW_ANCHOR_MAX_OMEGA_MAG),
         'yaw_anchor_max_laid_rms': float(YAW_ANCHOR_MAX_LAID_RMS),
