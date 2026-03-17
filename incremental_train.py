@@ -65,9 +65,9 @@ ZARU_THRESHOLD       = 1e-4
 ZARU_ACCEL_THRESHOLD = 5e-3  # Dual-sensor lock requirement
 
 # Evaluation fusion tuning profile (safe test preset)
-SLAP_THRESHOLD       = 3.5
-R_OBS_MIN_DIAG       = 0.2
-R_OBS_MAX_DIAG       = 1.0
+SLAP_THRESHOLD       = 2.5
+R_OBS_MIN_DIAG       = 0.05
+R_OBS_MAX_DIAG       = 0.30
 
 # Yaw-drift intervention (evaluation-time, conservative)
 ENABLE_YAW_ANCHOR        = False
@@ -778,6 +778,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'yaw_err_mean_deg': float(np.mean(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_p95_deg': float(np.percentile(diag_yaw_err_deg, 95)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_max_deg': float(np.max(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
+        'mahal_p95': float(np.percentile(diag_mahal_sq, 95)) if len(diag_mahal_sq) > 0 else 0.0,
         'slap_threshold': float(SLAP_THRESHOLD),
         'r_obs_min_diag': float(R_OBS_MIN_DIAG),
         'r_obs_max_diag': float(R_OBS_MAX_DIAG),
