@@ -69,7 +69,7 @@ SLAP_THRESHOLD       = 4.0
 R_OBS_STATIC_DIAG    = 0.2
 
 # Yaw-drift intervention (evaluation-time, conservative)
-ENABLE_YAW_ANCHOR        = True
+ENABLE_YAW_ANCHOR        = False
 YAW_ANCHOR_MIN_TRUST     = 0.35
 YAW_ANCHOR_MAX_OMEGA_MAG = 4.0
 YAW_ANCHOR_MAX_LAID_RMS  = 0.6
@@ -221,7 +221,7 @@ class ESKF:
         if trust < 0.15:
             return False  # weak signal, skip
         H = np.zeros((1, 15))
-        H[0, 11] = 1.0  # observe gyro bias Z -- NOT orientation state
+        H[0, 11] = -1.0  # h(x)=gyro_z_raw-bg_z -> dh/dbg_z = -1
         # Residual: LAID yaw rate vs bias-corrected gyro yaw [rad/s vs rad/s]
         z = np.array([omega_yaw_obs - (gyro_z_raw - self.bg[2])])
         R_yaw = np.array([[1.0 / (trust + 1e-6)]])
