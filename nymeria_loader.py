@@ -98,11 +98,15 @@ def make_windows(imu1, imu2, pos, quat, window, stride, augment=True):
 
         # 1. Translation Delta (Target Label)
         delta_p_global = pos[e] - pos[s]
-        R_start        = Rotation.from_quat(quat[s])  # Nymeria quat is [X,Y,Z,W]
-        R_end          = Rotation.from_quat(quat[e])
-        delta_p_local  = R_start.inv().apply(delta_p_global)
+        
+        # --- SURGICAL FIX: Frame Alignment ---
+        # The window covers samples [s : e]. The newest sample the ESKF has 
+        # when running inference is at index e-1. We must target this frame.
+        R_end          = Rotation.from_quat(quat[e-1])
+        delta_p_local  = R_end.inv().apply(delta_p_global)
 
         # 2. Rotational Delta (Target Label)
+        R_start = Rotation.from_quat(quat[s])  # Nymeria quat is [X,Y,Z,W]
         R_delta = R_start.inv() * R_end
         q_delta_xyzw = R_delta.as_quat()
         

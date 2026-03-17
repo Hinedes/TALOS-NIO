@@ -507,12 +507,11 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 diag_pred_std.append(current_std)
                 diag_abs_error.append(current_err)
 
-            # LAID yaw anchor -- physics-based yaw correction, independent of Overlord
-            omega_yaw, yaw_trust, omega_mag = laid_bouncer.yaw_anchor(win1, win2)
+            # KILL THIS: LAID is mathematically flawed in rotating frames
+            # omega_yaw, yaw_trust, omega_mag = laid_bouncer.yaw_anchor(win1, win2)
             # Compare average physical yaw rate vs average sensor yaw rate
-            current_mean_gyro_z = np.mean(win_gyro[:, 2])
-            eskf_talos.update_yaw_anchor(omega_yaw, current_mean_gyro_z, yaw_trust)
-
+            # current_mean_gyro_z = np.mean(win_gyro[:, 2])
+            # eskf_talos.update_yaw_anchor(omega_yaw, current_mean_gyro_z, yaw_trust)
         # ZARU (TALOS only)
         if len(gyro_buf) >= ZARU_WINDOW and step % ZARU_WINDOW == 0:
             gyro_var = np.var(np.array(gyro_buf[-ZARU_WINDOW:]), axis=0).sum()
