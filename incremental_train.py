@@ -314,15 +314,18 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
     best_val, t_losses = float('inf'), []
 
     def loss_fn(pt, pcov, gt):
-        # The "Speed Tax": dynamically weight loss by motion magnitude
+        # 1. Gaussian NLL: pcov is log(variance)
+        var = torch.exp(pcov)
+        nll = 0.5 * (pcov + ((pt - gt) ** 2) / var)
+        
+        # 2. The Hyper-Tax: Exponentially weight high velocities
+        # Linear was not enough to overcome the class imbalance. 
+        # A 1.5 m/s stride will now carry a 16x penalty multiplier (1.0 + 10 * 1.5).
         gt_mag = torch.norm(gt, dim=1, keepdim=True)
-        # Weight scales linearly with speed: stationary=1x, 1.5m/s walk ~ 8.5x
-        weight = 1.0 + 5.0 * gt_mag 
+        weight = 1.0 + 10.0 * gt_mag 
         
-        error_sq = (pt - gt) ** 2
-        weighted_error_sq = weight * error_sq
-        
-        return torch.mean(weighted_error_sq)
+        # 3. Weighted NLL
+        return torch.mean(weight * nll)
 
     for epoch in range(epochs):
         model.train()
@@ -713,10 +716,8 @@ def main():
         try:
             new_data   = load_sequence_cached(seq_path)
             
-            # --- Sliding Window N=3 ---
+            # --- Unlimited Accumulation ---
             subject_pool.append(new_data)
-            if len(subject_pool) > 3:
-                subject_pool.pop(0) # Drop the oldest subject
                 
             train_data = None
             for p_data in subject_pool:
