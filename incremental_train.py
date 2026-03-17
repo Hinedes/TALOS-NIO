@@ -688,6 +688,7 @@ def main():
     opt        = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
     sched      = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=3, min_lr=1e-5)
     train_data = None
+    subject_pool = []
     history    = []
 
     bad_rounds    = 0
@@ -710,7 +711,15 @@ def main():
 
         try:
             new_data   = load_sequence_cached(seq_path)
-            train_data = accumulate(train_data, new_data)
+            
+            # --- Sliding Window N=3 ---
+            subject_pool.append(new_data)
+            if len(subject_pool) > 3:
+                subject_pool.pop(0) # Drop the oldest subject
+                
+            train_data = None
+            for p_data in subject_pool:
+                train_data = accumulate(train_data, p_data)
             
             # --- SURGICAL FIX: Reset stagnation trackers ---
             # The dataset has changed, so the loss baseline must be reset.

@@ -12,7 +12,7 @@ from SMLP import SpectralMLP
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model  = SpectralMLP().to(device)
 ckpt   = torch.load('/mnt/c/TALOS/golden/talos_best_physical.pth', map_location=device)
-model.load_state_dict(ckpt)
+model.load_state_dict(ckpt, strict=False)
 
 val_path = Path('/mnt/c/TALOS/nymeria/Nymeria_v0.0_20230608_s0_shelby_arroyo_act0_3ciwl8_recording_head/recording_head')
 import pickle
