@@ -69,8 +69,14 @@ SLAP_THRESHOLD       = 2.5
 R_OBS_MIN_DIAG       = 0.05
 R_OBS_MAX_DIAG       = 0.30
 USE_DYNAMIC_R_OBS    = False
-R_OBS_FIXED_DIAG     = 0.05
-PRED_VEL_GAIN        = 1.75
+R_OBS_FIXED_DIAG     = 0.10
+PRED_VEL_GAIN        = 1.00
+
+# Catastrophic divergence safeguards
+MAX_PRED_WORLD_SPEED_MPS = 3.0
+MAX_INNOVATION_NORM_MPS  = 5.0
+CAT_ATE_ABS_M            = 100.0
+CAT_ATE_BEST_MULT        = 8.0
 
 # Yaw-drift intervention (evaluation-time, conservative)
 ENABLE_YAW_ANCHOR        = False
@@ -436,6 +442,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     zaru_fire_count = 0
     cau_fire_count = 0
     yaw_anchor_fire_count = 0
+    safety_reject_count = 0
 
     # --- Diagnostic Lens Buffers ---
     # Lens 1: Scale Collapse
@@ -549,11 +556,19 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     r_obs_diag = np.array([R_OBS_FIXED_DIAG] * 3, dtype=np.float64)
                 neural_updates += 1
                 innovation_norm = float(np.linalg.norm(v_world - eskf_talos.velocity))
-                accepted, mahal_sq = eskf_talos.update_velocity(
-                    v_world,
-                    R_obs=R_obs_used,
-                    slap_threshold=SLAP_THRESHOLD,
-                )
+                pred_world_speed = float(np.linalg.norm(v_world))
+
+                # Hard safety gate before Kalman update to prevent catastrophic injections
+                if (pred_world_speed > MAX_PRED_WORLD_SPEED_MPS) or (innovation_norm > MAX_INNOVATION_NORM_MPS):
+                    accepted = False
+                    mahal_sq = float('inf')
+                    safety_reject_count += 1
+                else:
+                    accepted, mahal_sq = eskf_talos.update_velocity(
+                        v_world,
+                        R_obs=R_obs_used,
+                        slap_threshold=SLAP_THRESHOLD,
+                    )
                 if accepted is False:
                     slap_count += 1
                     
@@ -601,6 +616,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'slap_accepted': bool(accepted),
                     'mahal_sq': float(mahal_sq),
                     'mahal_r_sq': float(mahal_r_sq),
+                    'innovation_norm': float(innovation_norm),
+                    'pred_world_speed_mps': float(pred_world_speed),
+                    'safety_reject': bool((pred_world_speed > MAX_PRED_WORLD_SPEED_MPS) or (innovation_norm > MAX_INNOVATION_NORM_MPS)),
                     'gt_speed_mps': float(np.linalg.norm(gt_v_local)),
                     'pred_vx': float(pred_v_local[0]),
                     'pred_vy': float(pred_v_local[1]),
@@ -634,6 +652,9 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     'slap_accepted': None,
                     'mahal_sq': None,
                     'mahal_r_sq': None,
+                    'innovation_norm': None,
+                    'pred_world_speed_mps': None,
+                    'safety_reject': False,
                     'gt_speed_mps': None,
                     'pred_vx': float(pred_vel_local[0]),
                     'pred_vy': float(pred_vel_local[1]),
@@ -772,6 +793,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     if neural_updates > 0:
         slap_rate = (slap_count / neural_updates) * 100
         print(f"  [Slap Gate] {slap_count}/{neural_updates} updates rejected ({slap_rate:.1f}%)")
+        if safety_reject_count > 0:
+            print(f"  [Safety]    {safety_reject_count}/{neural_updates} updates blocked by hard guardrails")
     else:
         slap_rate = 0.0
 
@@ -808,6 +831,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'cau_fire_count': int(cau_fire_count),
         'yaw_anchor_enabled': bool(ENABLE_YAW_ANCHOR),
         'yaw_anchor_fire_count': int(yaw_anchor_fire_count),
+        'safety_reject_count': int(safety_reject_count),
         'yaw_err_mean_deg': float(np.mean(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_p95_deg': float(np.percentile(diag_yaw_err_deg, 95)) if len(diag_yaw_err_deg) > 0 else 0.0,
         'yaw_err_max_deg': float(np.max(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
@@ -823,6 +847,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'use_dynamic_r_obs': bool(USE_DYNAMIC_R_OBS),
         'r_obs_fixed_diag': float(R_OBS_FIXED_DIAG),
         'pred_vel_gain': float(PRED_VEL_GAIN),
+        'max_pred_world_speed_mps': float(MAX_PRED_WORLD_SPEED_MPS),
+        'max_innovation_norm_mps': float(MAX_INNOVATION_NORM_MPS),
         'yaw_anchor_min_trust': float(YAW_ANCHOR_MIN_TRUST),
         'yaw_anchor_max_omega_mag': float(YAW_ANCHOR_MAX_OMEGA_MAG),
         'yaw_anchor_max_laid_rms': float(YAW_ANCHOR_MAX_LAID_RMS),
@@ -982,6 +1008,14 @@ def main():
         val_df_walk = val_df.iloc[313*100:].reset_index(drop=True)
         mean_ate = evaluate_eskf(model, val_df_walk, val_gravity, device, round_idx, run_dir, max_seconds=300)
         print(f"  [Result] Neural Loss: {train_final:.4f} | ESKF ATE: {mean_ate:.3f}m")
+
+        # Catastrophic divergence breaker -- abort early instead of burning rounds
+        cat_limit = max(CAT_ATE_ABS_M, best_ate_ever * CAT_ATE_BEST_MULT if np.isfinite(best_ate_ever) else CAT_ATE_ABS_M)
+        if mean_ate > cat_limit:
+            print(f"\n!! CATASTROPHIC DIVERGENCE: ATE {mean_ate:.3f}m exceeded limit {cat_limit:.3f}m. Halting.")
+            history.append({'round': round_idx, 'ate': mean_ate, 'train_loss': train_final})
+            update_master_dashboard(history, run_dir / 'master_telemetry.png')
+            break
 
         history.append({'round': round_idx, 'ate': mean_ate, 'train_loss': train_final})
         update_master_dashboard(history, run_dir / 'master_telemetry.png')
