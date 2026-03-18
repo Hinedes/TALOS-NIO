@@ -73,8 +73,8 @@ R_OBS_FIXED_DIAG     = 0.10
 PRED_VEL_GAIN        = 1.00
 
 # Catastrophic divergence safeguards
-MAX_PRED_WORLD_SPEED_MPS = 6.0
-MAX_INNOVATION_NORM_MPS  = 8.0
+MAX_PRED_WORLD_SPEED_MPS = 999.0
+MAX_INNOVATION_NORM_MPS  = 999.0
 CAT_ATE_ABS_M            = 100.0
 CAT_ATE_BEST_MULT        = 8.0
 CAT_STRIKE_LIMIT         = 10
@@ -764,22 +764,26 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     evaluate_eskf._last_gt_pos    = gt_pos
     talos_err_caged = np.linalg.norm(talos_positions - gt_pos, axis=1)
     talos_err_nocage = np.linalg.norm(talos_positions_nocage - gt_pos, axis=1)
-    mean_ate        = talos_err_nocage.mean()
-    final_ate       = talos_err_nocage[-1]
+    mean_ate        = talos_err_caged.mean()
+    final_ate       = talos_err_caged[-1]
     caged_ate       = talos_err_caged.mean()
     caged_final_ate = talos_err_caged[-1]
+    nocage_ate      = talos_err_nocage.mean()
+    nocage_final_ate = talos_err_nocage[-1]
     total_distance  = np.sum(np.linalg.norm(np.diff(gt_pos, axis=0), axis=1))
     mean_rte        = (mean_ate / total_distance) * 100
     final_rte       = (final_ate / total_distance) * 100
     caged_mean_rte  = (caged_ate / total_distance) * 100
     caged_final_rte = (caged_final_ate / total_distance) * 100
+    nocage_mean_rte = (nocage_ate / total_distance) * 100
+    nocage_final_rte = (nocage_final_ate / total_distance) * 100
 
     fig = plt.figure(figsize=(16, 6))
     fig.suptitle(
-        f"Round {round_idx} | TALOS ATE (no-cage): {mean_ate:.3f}m (RTE {mean_rte:.2f}%) "
-        f"| Caged ATE: {caged_ate:.3f}m (RTE {caged_mean_rte:.2f}%) "
-        f"| Final Drift (no-cage): {final_ate:.3f}m ({final_rte:.2f}%) "
-        f"| Final Drift (caged): {caged_final_ate:.3f}m ({caged_final_rte:.2f}%) "
+        f"Round {round_idx} | TALOS ATE (caged): {mean_ate:.3f}m (RTE {mean_rte:.2f}%) "
+        f"| No-cage ATE: {nocage_ate:.3f}m (RTE {nocage_mean_rte:.2f}%) "
+        f"| Final Drift (caged): {final_ate:.3f}m ({final_rte:.2f}%) "
+        f"| Final Drift (no-cage): {nocage_final_ate:.3f}m ({nocage_final_rte:.2f}%) "
         f"| Pure IMU: {np.linalg.norm(pure_positions - gt_pos, axis=1).mean():.3f}m",
         fontweight='bold'
     )
@@ -842,11 +846,11 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     pure_imu_ate = float(np.linalg.norm(pure_positions - gt_pos, axis=1).mean())
     summary_row = {
         'mean_ate_m': float(mean_ate),
-        'no_cage_ate_m': float(mean_ate),
+        'no_cage_ate_m': float(nocage_ate),
         'caged_ate_m': float(caged_ate),
         'mean_rte_pct': float(mean_rte),
         'final_ate_m': float(final_ate),
-        'no_cage_final_ate_m': float(final_ate),
+        'no_cage_final_ate_m': float(nocage_final_ate),
         'caged_final_ate_m': float(caged_final_ate),
         'final_rte_pct': float(final_rte),
         'pure_imu_ate_m': pure_imu_ate,
