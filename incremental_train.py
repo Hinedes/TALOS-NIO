@@ -90,7 +90,7 @@ YAW_ANCHOR_MAX_LAID_RMS  = 0.6
 # LAID differential gyro-bias update (measurement-space, tightly coupled)
 ENABLE_LAID_DIFF_UPDATE  = True
 LAID_DIFF_MIN_OMEGA_MAG  = 0.10
-LAID_DIFF_R_DIAG         = 0.20
+LAID_DIFF_R_DIAG         = 50.0
 LAID_DIFF_GATE_THRESHOLD = 4.0
 
 # ESKF Physics Engine
@@ -313,8 +313,9 @@ class ESKF:
         K[12:15, :] = 0.0
 
         dx = (K[:, 0] * y)
+        dx_bg = np.clip(dx[9:12], -1e-4, 1e-4)
         bg_before = self.bg.copy()
-        self.bg += dx[9:12]
+        self.bg += dx_bg
 
         I = np.eye(15)
         IKH = I - K @ H
