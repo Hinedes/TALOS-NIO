@@ -77,7 +77,7 @@ MAX_PRED_WORLD_SPEED_MPS = 6.0
 MAX_INNOVATION_NORM_MPS  = 8.0
 CAT_ATE_ABS_M            = 100.0
 CAT_ATE_BEST_MULT        = 8.0
-CAT_STRIKE_LIMIT         = 3
+CAT_STRIKE_LIMIT         = 10
 SOFT_ATE_BEST_MULT       = 1.35
 SOFT_CAGE_CLAMP_PCT      = 45.0
 
@@ -962,6 +962,7 @@ def main():
     best_ate_ever = float('inf')
     best_ate_round = -1
     cat_strikes = 0
+    blacklisted_sids = set()
     soft_quarantines = 0
 
     best_loss_ever       = float('inf')
@@ -975,6 +976,9 @@ def main():
             break
 
         print(f"\n:: Round {round_idx} : {sid[:15]}... :: (Free disk: {free:.1f} GB)")
+        if sid in blacklisted_sids:
+            print(f"  [Blacklist] Skipping {sid[:40]} -- previously quarantined")
+            continue
         seq_path = download_sequence(sid, entry, root)
         if not seq_path: continue
 
@@ -1034,6 +1038,8 @@ def main():
             # Quarantine the just-added sequence from the subject pool
             if subject_pool:
                 subject_pool.pop()
+                blacklisted_sids.add(sid)
+                print(f"   [Blacklist] {sid[:40]} permanently blacklisted")
                 train_data = None
                 for p_data in subject_pool:
                     train_data = accumulate(train_data, p_data)
@@ -1070,6 +1076,8 @@ def main():
 
             if subject_pool:
                 subject_pool.pop()
+                blacklisted_sids.add(sid)
+                print(f"   [Blacklist] {sid[:40]} permanently blacklisted")
                 train_data = None
                 for p_data in subject_pool:
                     train_data = accumulate(train_data, p_data)
