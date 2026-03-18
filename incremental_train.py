@@ -726,8 +726,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         distance = np.linalg.norm(head_vector)
         cage_clamped = False
 
-        if distance > 0.50:
-            eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * 0.50
+        if distance > 0.12:
+            eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * 0.12
             cage_clamp_count += 1
             cage_clamped = True
 
