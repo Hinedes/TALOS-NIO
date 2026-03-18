@@ -93,6 +93,11 @@ LAID_DIFF_MIN_OMEGA_MAG  = 0.10
 LAID_DIFF_R_DIAG         = 50.0
 LAID_DIFF_GATE_THRESHOLD = 4.0
 
+ENABLE_LAID_WINDOWED     = True
+LAID_WINDOWED_R_DIAG     = 0.2
+LAID_WINDOWED_BG_CLAMP   = 1e-3
+LAID_WINDOWED_MIN_OMEGA  = 0.05
+
 # ESKF Physics Engine
 class ESKF:
     def __init__(self, dt=0.01, gravity=None):
@@ -236,6 +241,77 @@ class ESKF:
         self.ba += dx[12:15] * 0.05
         
         self.P = (np.eye(15) - K @ H) @ self.P
+
+    def update_laid_windowed_velocity(self, v_diff_meas, g1_mean, r,
+                                      window_time, R_diag=0.2,
+                                      bg_clamp=1e-3, min_omega=0.05):
+        """Tightly-coupled windowed tangential LAID update for gyro bias [9:12].
+
+        Physics:
+            Over a 0.64s window, integrate the differential acceleration:
+                v_diff = sum(a2 - a1) * dt  [m/s]
+            High-frequency structural flex (zero-mean vibration) integrates to ~0.
+            Low-frequency head rotation produces:
+                v_diff_pred = cross(omega, r) * window_time
+
+        Jacobian (gyro bias states only):
+            d(cross(omega, r) * T) / d(bg) = skew(r) * T
+            (using d(omega)/d(bg) = -I, d(cross(a,b))/da = -skew(b))
+
+        Args:
+            v_diff_meas  : (3,) integrated velocity differential [m/s]
+            g1_mean      : (3,) mean angular velocity over window [rad/s]
+            r            : (3,) lever arm vector [m]
+            window_time  : float, window duration [s]
+            R_diag       : float, measurement noise variance [m^2/s^2]
+            bg_clamp     : float, max bg correction per update [rad/s]
+            min_omega    : float, minimum |omega| to fire [rad/s]
+
+        Returns:
+            applied (bool), bg_delta_norm (float)
+        """
+        r = np.asarray(r, dtype=np.float64)
+        g1_mean = np.asarray(g1_mean, dtype=np.float64)
+        v_diff_meas = np.asarray(v_diff_meas, dtype=np.float64)
+
+        omega = g1_mean - self.bg
+        omega_mag = float(np.linalg.norm(omega))
+        if omega_mag < min_omega:
+            return False, 0.0
+
+        # Predicted velocity differential from lever arm kinematics
+        v_diff_pred = np.cross(omega, r) * window_time
+
+        # Residual
+        y = v_diff_meas - v_diff_pred
+        if not np.all(np.isfinite(y)):
+            return False, 0.0
+
+        # Jacobian: H = skew(r) * window_time, placed at gyro bias columns [9:12]
+        H = np.zeros((3, 15), dtype=np.float64)
+        H[0:3, 9:12] = self._skew(r) * window_time
+
+        R_obs = np.eye(3, dtype=np.float64) * R_diag
+        S = H @ self.P @ H.T + R_obs
+        K = np.linalg.solve(S.T, (self.P @ H.T).T).T
+
+        # Quarantine: gyro bias states only
+        K[0:9, :] = 0.0
+        K[12:15, :] = 0.0
+
+        dx = K @ y
+        dx_bg = np.clip(dx[9:12], -bg_clamp, bg_clamp)
+
+        bg_before = self.bg.copy()
+        self.bg += dx_bg
+
+        # Joseph form
+        I = np.eye(15)
+        IKH = I - K @ H
+        self.P = IKH @ self.P @ IKH.T + K @ R_obs @ K.T
+        self.P = 0.5 * (self.P + self.P.T)
+
+        return True, float(np.linalg.norm(self.bg - bg_before))
 
     def update_yaw_anchor(self, omega_yaw_obs, gyro_z_raw, trust):
         """LAID yaw rate pseudo-measurement targeting gyro bias Z (index 11).
@@ -519,6 +595,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     laid_diff_attempt_count = 0
     laid_diff_update_count = 0
     laid_diff_reject_count = 0
+    laid_windowed_update_count = 0
 
     # --- Diagnostic Lens Buffers ---
     # Lens 1: Scale Collapse
@@ -653,6 +730,27 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                         )
                         if yaw_anchor_applied:
                             yaw_anchor_fire_count += 1
+
+                # --- Windowed LAID tangential update ---
+                if ENABLE_LAID_WINDOWED:
+                    a1_win = np.array(accel_buf, dtype=np.float64)
+                    a2_win = np.array(accel2_buf, dtype=np.float64)
+                    g1_mean = np.mean(np.array(gyro_buf), axis=0).astype(np.float64)
+                    a_diff = a2_win - a1_win
+                    v_diff_meas = np.sum(a_diff, axis=0) * dt
+                    window_time = WINDOW_SIZE * dt
+
+                    laid_w_applied, _laid_w_bg_delta = eskf_talos.update_laid_windowed_velocity(
+                        v_diff_meas=v_diff_meas,
+                        g1_mean=g1_mean,
+                        r=laid_bouncer.r,
+                        window_time=window_time,
+                        R_diag=LAID_WINDOWED_R_DIAG,
+                        bg_clamp=LAID_WINDOWED_BG_CLAMP,
+                        min_omega=LAID_WINDOWED_MIN_OMEGA,
+                    )
+                    if laid_w_applied:
+                        laid_windowed_update_count += 1
 
                 # Direct rotation from local velocity to world velocity
                 v_world = eskf_talos.orientation @ pred_vel_local
@@ -985,6 +1083,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'safety_reject_count': int(safety_reject_count),
         'laid_diff_updates': int(laid_diff_update_count),
         'laid_diff_reject_rate_pct': float((laid_diff_reject_count / max(laid_diff_attempt_count, 1)) * 100.0),
+        'laid_windowed_updates': int(laid_windowed_update_count),
+        'laid_windowed_rate_pct': float(laid_windowed_update_count / max(neural_updates, 1) * 100.0),
         'laid_diff_residual_p95': _p95_finite(diag_laid_diff_res_norm),
         'bg_update_norm_p95': _p95_finite(diag_bg_dx_norm),
         'yaw_err_mean_deg': float(np.mean(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
