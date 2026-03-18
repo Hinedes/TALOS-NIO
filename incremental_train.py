@@ -436,7 +436,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     halo = HALOObserver(init_rot)
     accel_buf, gyro_buf = [], []
     accel2_buf, gyro2_buf = [], []
-    talos_positions, pure_positions = [], []
+    talos_positions, talos_positions_nocage, pure_positions = [], [], []
     window_time = WINDOW_SIZE * dt
 
     slap_count = 0
@@ -488,9 +488,6 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         yaw_err_deg = Rotation.from_matrix(R_heading_err).as_euler('ZYX', degrees=True)[0]
         yaw_err_deg = ((yaw_err_deg + 180.0) % 360.0) - 180.0
         diag_yaw_err_deg.append(abs(yaw_err_deg))
-
-        talos_positions.append(eskf_talos.position.copy())
-        pure_positions.append(eskf_pure.position.copy())
 
         accel_buf.append(a)
         gyro_buf.append(g)
@@ -725,17 +722,25 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         head_vector = eskf_talos.position - evaluate_eskf._cage_center
         distance = np.linalg.norm(head_vector)
         cage_clamped = False
+        talos_pos_nocage = eskf_talos.position.copy()
 
         if distance > 0.50:
             eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * 0.50
             cage_clamp_count += 1
             cage_clamped = True
 
+        talos_positions_nocage.append(talos_pos_nocage)
+        talos_positions.append(eskf_talos.position.copy())
+        pure_positions.append(eskf_pure.position.copy())
+
         diag_step_rows.append({
             'step_idx': step,
             'talos_x': float(eskf_talos.position[0]),
             'talos_y': float(eskf_talos.position[1]),
             'talos_z': float(eskf_talos.position[2]),
+            'talos_nocage_x': float(talos_pos_nocage[0]),
+            'talos_nocage_y': float(talos_pos_nocage[1]),
+            'talos_nocage_z': float(talos_pos_nocage[2]),
             'pure_x': float(eskf_pure.position[0]),
             'pure_y': float(eskf_pure.position[1]),
             'pure_z': float(eskf_pure.position[2]),
@@ -743,6 +748,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             'gt_y': float(gt_pos[step, 1]),
             'gt_z': float(gt_pos[step, 2]),
             'talos_err_m': float(np.linalg.norm(eskf_talos.position - gt_pos[step])),
+            'talos_nocage_err_m': float(np.linalg.norm(talos_pos_nocage - gt_pos[step])),
             'pure_err_m': float(np.linalg.norm(eskf_pure.position - gt_pos[step])),
             'yaw_err_deg_abs': float(diag_yaw_err_deg[-1]),
             'cage_clamped': cage_clamped,
@@ -751,20 +757,29 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         })
 
     talos_positions = np.array(talos_positions)
+    talos_positions_nocage = np.array(talos_positions_nocage)
     pure_positions  = np.array(pure_positions)
-    evaluate_eskf._last_talos_pos = talos_positions
+    evaluate_eskf._last_talos_pos = talos_positions_nocage
+    evaluate_eskf._last_talos_pos_caged = talos_positions
     evaluate_eskf._last_gt_pos    = gt_pos
-    talos_err       = np.linalg.norm(talos_positions - gt_pos, axis=1)
-    mean_ate        = talos_err.mean()
-    final_ate       = talos_err[-1]
+    talos_err_caged = np.linalg.norm(talos_positions - gt_pos, axis=1)
+    talos_err_nocage = np.linalg.norm(talos_positions_nocage - gt_pos, axis=1)
+    mean_ate        = talos_err_nocage.mean()
+    final_ate       = talos_err_nocage[-1]
+    caged_ate       = talos_err_caged.mean()
+    caged_final_ate = talos_err_caged[-1]
     total_distance  = np.sum(np.linalg.norm(np.diff(gt_pos, axis=0), axis=1))
     mean_rte        = (mean_ate / total_distance) * 100
     final_rte       = (final_ate / total_distance) * 100
+    caged_mean_rte  = (caged_ate / total_distance) * 100
+    caged_final_rte = (caged_final_ate / total_distance) * 100
 
     fig = plt.figure(figsize=(16, 6))
     fig.suptitle(
-        f"Round {round_idx} | TALOS ATE: {mean_ate:.3f}m (RTE {mean_rte:.2f}%) "
-        f"| Final Drift: {final_ate:.3f}m ({final_rte:.2f}%) "
+        f"Round {round_idx} | TALOS ATE (no-cage): {mean_ate:.3f}m (RTE {mean_rte:.2f}%) "
+        f"| Caged ATE: {caged_ate:.3f}m (RTE {caged_mean_rte:.2f}%) "
+        f"| Final Drift (no-cage): {final_ate:.3f}m ({final_rte:.2f}%) "
+        f"| Final Drift (caged): {caged_final_ate:.3f}m ({caged_final_rte:.2f}%) "
         f"| Pure IMU: {np.linalg.norm(pure_positions - gt_pos, axis=1).mean():.3f}m",
         fontweight='bold'
     )
@@ -827,8 +842,12 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     pure_imu_ate = float(np.linalg.norm(pure_positions - gt_pos, axis=1).mean())
     summary_row = {
         'mean_ate_m': float(mean_ate),
+        'no_cage_ate_m': float(mean_ate),
+        'caged_ate_m': float(caged_ate),
         'mean_rte_pct': float(mean_rte),
         'final_ate_m': float(final_ate),
+        'no_cage_final_ate_m': float(final_ate),
+        'caged_final_ate_m': float(caged_final_ate),
         'final_rte_pct': float(final_rte),
         'pure_imu_ate_m': pure_imu_ate,
         'slap_count': int(slap_count),
