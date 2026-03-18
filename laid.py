@@ -100,56 +100,6 @@ class LAIDBouncer:
         tangential   = np.cross(alpha, self.r)                    # α × r
         return centripetal + tangential
 
-    @staticmethod
-    def _skew(v):
-        return np.array([[0.0,   -v[2],  v[1]],
-                         [v[2],   0.0,  -v[0]],
-                         [-v[1],  v[0],  0.0]], dtype=np.float64)
-
-    def differential_measurement(self, a1, g1, a2, alpha_meas=None):
-        """Build LAID differential measurement terms for tightly-coupled ESKF update.
-
-        Measurement model:
-            z_meas = a2 - a1
-            z_hat  = alpha x r + omega x (omega x r)
-            y      = z_meas - z_hat
-
-        Gyro-bias Jacobian block (for bg states):
-            H_bg = -(omega^x r^x + (omega^x r)^x)
-
-        Args:
-            a1 : (3,) accel IMU1
-            g1 : (3,) gyro  IMU1 (measured)
-            a2 : (3,) accel IMU2
-            alpha_meas : (3,) measured angular acceleration. If None, zeros.
-
-        Returns:
-            y          : (3,) residual
-            z_meas     : (3,) measured differential accel
-            z_hat      : (3,) predicted differential accel
-            omega_meas : (3,) measured angular velocity
-            alpha_meas : (3,) angular acceleration used
-            H_bg       : (3,3) Jacobian block for gyro bias states
-        """
-        omega_meas = np.asarray(g1, dtype=np.float64)
-        a1 = np.asarray(a1, dtype=np.float64)
-        a2 = np.asarray(a2, dtype=np.float64)
-        if alpha_meas is None:
-            alpha_meas = np.zeros(3, dtype=np.float64)
-        else:
-            alpha_meas = np.asarray(alpha_meas, dtype=np.float64)
-
-        z_meas = a2 - a1
-        z_hat = self._predict_diff(omega_meas, alpha_meas)
-        y = z_meas - z_hat
-
-        omega_x = self._skew(omega_meas)
-        r_x = self._skew(self.r)
-        omega_x_r = omega_x @ self.r
-        H_bg = -(omega_x @ r_x + self._skew(omega_x_r))
-
-        return y, z_meas, z_hat, omega_meas, alpha_meas, H_bg
-
     def check(self, imu1_window, imu2_window, dt=None):
         """
         Args:
