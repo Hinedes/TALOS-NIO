@@ -83,6 +83,7 @@ SOFT_CAGE_CLAMP_PCT      = 45.0
 
 # Yaw-drift intervention (evaluation-time, conservative)
 ENABLE_YAW_ANCHOR        = False
+YAW_ANCHOR_HARD_LOCK     = True
 YAW_ANCHOR_MIN_TRUST     = 0.35
 YAW_ANCHOR_MAX_OMEGA_MAG = 4.0
 YAW_ANCHOR_MAX_LAID_RMS  = 0.6
@@ -532,7 +533,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             if not laid_veto:
                 # Optional conservative dynamic yaw anchor (LAID-based)
                 yaw_anchor_applied = False
-                if ENABLE_YAW_ANCHOR:
+                if ENABLE_YAW_ANCHOR and (not YAW_ANCHOR_HARD_LOCK):
                     omega_yaw, yaw_trust, omega_mag = laid_bouncer.yaw_anchor(win1, win2)
                     current_mean_gyro_z = float(np.mean(win_gyro[:, 2]))
                     if (
@@ -809,7 +810,7 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
             f"p95={np.percentile(yaw_err, 95):.2f}° "
             f"max={np.max(yaw_err):.2f}°"
         )
-        if ENABLE_YAW_ANCHOR:
+        if ENABLE_YAW_ANCHOR and (not YAW_ANCHOR_HARD_LOCK):
             print(f"  [Yaw Anchor] applied {yaw_anchor_fire_count} times")
         
     cage_clamp_rate = (cage_clamp_count / len(df)) * 100
@@ -839,7 +840,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         'laid_veto_rate_pct': float((laid_veto_count / max(neural_updates + laid_veto_count, 1)) * 100.0),
         'zaru_fire_count': int(zaru_fire_count),
         'cau_fire_count': int(cau_fire_count),
-        'yaw_anchor_enabled': bool(ENABLE_YAW_ANCHOR),
+        'yaw_anchor_enabled': bool(ENABLE_YAW_ANCHOR and (not YAW_ANCHOR_HARD_LOCK)),
+        'yaw_anchor_hard_lock': bool(YAW_ANCHOR_HARD_LOCK),
         'yaw_anchor_fire_count': int(yaw_anchor_fire_count),
         'safety_reject_count': int(safety_reject_count),
         'yaw_err_mean_deg': float(np.mean(diag_yaw_err_deg)) if len(diag_yaw_err_deg) > 0 else 0.0,
