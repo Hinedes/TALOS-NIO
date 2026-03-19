@@ -78,8 +78,9 @@ MAX_INNOVATION_NORM_MPS  = 999.0
 CAT_ATE_ABS_M            = 100.0
 CAT_ATE_BEST_MULT        = 8.0
 CAT_STRIKE_LIMIT         = 10
-SOFT_ATE_BEST_MULT       = 3.0
-SOFT_CAGE_CLAMP_PCT      = 85.0
+SOFT_ATE_BEST_MULT       = 2.0
+SOFT_CAGE_CLAMP_PCT      = 70.0
+CAGE_RADIUS              = 0.50
 
 # Yaw-drift intervention (evaluation-time, conservative)
 ENABLE_YAW_ANCHOR        = False
@@ -1042,10 +1043,16 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         cage_clamped = False
         talos_pos_nocage = eskf_talos.position.copy()
 
-        if distance > 0.50:
-            eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * 0.50
+        if distance > CAGE_RADIUS:
+            eskf_talos.position = evaluate_eskf._cage_center + (head_vector / distance) * CAGE_RADIUS
             cage_clamp_count += 1
             cage_clamped = True
+
+            n = (eskf_talos.position - evaluate_eskf._cage_center)
+            n = n / np.linalg.norm(n)
+            v_radial = np.dot(eskf_talos.velocity, n)
+            if v_radial > 0:
+                eskf_talos.velocity -= v_radial * n
 
         talos_positions_nocage.append(talos_pos_nocage)
         talos_positions.append(eskf_talos.position.copy())
