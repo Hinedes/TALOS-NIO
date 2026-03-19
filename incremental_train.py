@@ -594,18 +594,13 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
     best_val, t_losses = float('inf'), []
 
     def loss_fn(pt, pcov, gt):
-        # 1. Gaussian NLL: pcov is log(variance)
         var = torch.exp(pcov)
-        nll = 0.5 * (pcov + ((pt - gt) ** 2) / var)
-        
-        # 2. The Hyper-Tax: Exponentially weight high velocities
-        # Linear was not enough to overcome the class imbalance. 
-        # A 1.5 m/s stride will now carry a 16x penalty multiplier (1.0 + 10 * 1.5).
+        mse_raw = (pt - gt) ** 2
+        nll = 0.5 * (pcov + mse_raw / var)
         gt_mag = torch.norm(gt, dim=1, keepdim=True)
-        weight = 1.0 + 10.0 * gt_mag 
-        
-        # 3. Weighted NLL
-        return torch.mean(weight * nll)
+        weight = 1.0 + 10.0 * gt_mag
+        total_loss = nll + (2.0 * mse_raw)
+        return torch.mean(weight * total_loss)
 
     for epoch in range(epochs):
         model.train()
