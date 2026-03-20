@@ -597,16 +597,24 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
 
     def loss_fn(pt, pcov, gt):
         var = torch.exp(pcov)
-        mse_raw = (pt - gt) ** 2
-        nll = 0.5 * (pcov + mse_raw / var)
-        gt_mag = torch.norm(gt, dim=1, keepdim=True)
-        weight = 1.0 + 10.0 * gt_mag
-        lambda_dir = 0.05
-        lambda_mag = 1.0
+        
+        # 1. Geometric Kinetics (Trains ONLY the Translation Branch)
         pred_norm = pt.norm(dim=-1)
         gt_norm = gt.norm(dim=-1)
         loss_dir = 1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-8).mean()
         loss_mag = F.huber_loss(pred_norm, gt_norm, delta=0.1)
+        
+        # 2. Uncertainty Calibration (Trains ONLY the Covariance Branch)
+        # DETACH pt so NLL cannot pull the velocity predictions toward zero
+        mse_detached = (pt.detach() - gt) ** 2
+        nll = 0.5 * (pcov + mse_detached / var)
+        
+        gt_mag = torch.norm(gt, dim=1, keepdim=True)
+        weight = 1.0 + 10.0 * gt_mag
+        
+        lambda_dir = 0.05
+        lambda_mag = 1.0
+        
         total_loss = nll + lambda_dir * loss_dir + lambda_mag * loss_mag
         return torch.mean(weight * total_loss)
 
