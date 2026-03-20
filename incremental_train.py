@@ -600,7 +600,7 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
         nll = 0.5 * (pcov + mse_raw / var)
         gt_mag = torch.norm(gt, dim=1, keepdim=True)
         weight = 1.0 + 10.0 * gt_mag
-        total_loss = nll
+        total_loss = nll + (2.0 * mse_raw)
         return torch.mean(weight * total_loss)
 
     for epoch in range(epochs):
@@ -1420,6 +1420,7 @@ def main():
             best_ckpt = run_dir / 'talos_best_physical.pth'
             if best_ckpt.exists():
                 model.load_state_dict(torch.load(best_ckpt, map_location=device, weights_only=False))
+                opt.state = {}
                 torch.save(model.state_dict(), golden / 'talos.pth')
                 print("   [Rollback] Restored last best physical checkpoint")
             else:
@@ -1457,6 +1458,7 @@ def main():
             best_ckpt = run_dir / 'talos_best_physical.pth'
             if best_ckpt.exists():
                 model.load_state_dict(torch.load(best_ckpt, map_location=device, weights_only=False))
+                opt.state = {}
                 torch.save(model.state_dict(), golden / 'talos.pth')
                 print("   [Rollback] Restored last best physical checkpoint")
 
