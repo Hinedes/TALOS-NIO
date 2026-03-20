@@ -196,7 +196,8 @@ class ESKF:
             return False, mahal_max
 
         K = self.P @ H.T @ S_inv
-        K[9:15, :] = 0.0
+        K[9:12, :] = 0.0   # accel bias quarantined -- speed ratio still 0.28, premature update destroys propagation
+        # gyro bias [12:15] NOT quarantined -- observable via cross-covariance, needed for heading correction
 
         dx = K @ y
 
