@@ -26,29 +26,44 @@ import torch.nn.functional as F
 class SpectralMLPNPU(nn.Module):
     def __init__(self):
         super().__init__()
-        self.drop = nn.Dropout(0.4)
-        self.fc1  = nn.Linear(198, 256)
-        self.bn1  = nn.BatchNorm1d(256)
-        self.fc2  = nn.Linear(256, 128)
-        self.bn2  = nn.BatchNorm1d(128)
-        self.fc3  = nn.Linear(128, 64)
-        self.bn3  = nn.BatchNorm1d(64)
+        # Shared backbone
+        self.fc1 = nn.Linear(198, 256)
+        self.bn1 = nn.BatchNorm1d(256)
+        self.fc2 = nn.Linear(256, 128)
+        self.bn2 = nn.BatchNorm1d(128)
 
+        # Dropout on hidden embedding -- NOT on raw spectral input
+        self.drop = nn.Dropout(0.15)
+
+        # Translation branch (kinematics)
+        self.fc_trans   = nn.Linear(128, 64)
+        self.bn_trans   = nn.BatchNorm1d(64)
         self.head_trans = nn.Linear(64, 3)
-        self.head_cov   = nn.Linear(64, 3)
 
-        # Calibrated init for covariance head.
-        # Small random weights: restores covariance-loss gradient into the backbone.
-        # Bias at -2.0: σ² ≈ 0.135 at init, matching actual displacement error ~0.15.
+        # Covariance branch (uncertainty)
+        self.fc_cov   = nn.Linear(128, 64)
+        self.bn_cov   = nn.BatchNorm1d(64)
+        self.head_cov = nn.Linear(64, 3)
+
+        # Calibrated covariance init -- do not change
         nn.init.normal_(self.head_cov.weight, mean=0.0, std=0.01)
         nn.init.constant_(self.head_cov.bias, -2.0)
 
     def forward(self, x):
-        x = self.drop(x)
+        # Shared feature extraction -- no dropout on raw 198-bin input
         x = F.relu(self.bn1(self.fc1(x)))
+        x = self.drop(x)
         x = F.relu(self.bn2(self.fc2(x)))
-        x = F.relu(self.bn3(self.fc3(x)))
-        return self.head_trans(x), self.head_cov(x)   # (pred_delta, log_var)
+
+        # Translation path
+        t = F.relu(self.bn_trans(self.fc_trans(x)))
+        pred_vel = self.head_trans(t)
+
+        # Covariance path
+        c = F.relu(self.bn_cov(self.fc_cov(x)))
+        pred_cov = self.head_cov(c)
+
+        return pred_vel, pred_cov
 
 
 class SpectralMLP(nn.Module):
