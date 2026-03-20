@@ -600,7 +600,13 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
         nll = 0.5 * (pcov + mse_raw / var)
         gt_mag = torch.norm(gt, dim=1, keepdim=True)
         weight = 1.0 + 10.0 * gt_mag
-        total_loss = nll + (2.0 * mse_raw)
+        lambda_dir = 0.05
+        lambda_mag = 1.0
+        pred_norm = pt.norm(dim=-1)
+        gt_norm = gt.norm(dim=-1)
+        loss_dir = 1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-8).mean()
+        loss_mag = F.huber_loss(pred_norm, gt_norm, delta=0.1)
+        total_loss = nll + lambda_dir * loss_dir + lambda_mag * loss_mag
         return torch.mean(weight * total_loss)
 
     for epoch in range(epochs):
