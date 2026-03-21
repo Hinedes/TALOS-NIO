@@ -1400,6 +1400,9 @@ def main():
             continue
 
         print(f"  [Train] Pool size: {train_data['trans'].shape[0]:,} windows")
+        for param_group in opt.param_groups:
+            param_group['lr'] = 3e-4
+        sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=3, min_lr=1e-5)
         train_final, _ = train_round(model, opt, sched, train_data, val_data, device,
                                      EPOCHS_PER_ROUND, golden / 'talos.pth')
 
