@@ -1,22 +1,12 @@
 """
-SMLP.py — SpectralMLP (Rev. 2)
+SMLP.py — Phase-Aware SpectralMLP (Rev. 3)
 TALOS NIO Neural Backbone
 
 Architecture:
-  - Wrapper: Handles CPU-side FFT for seamless training from (B, 6, 64) raw IMU.
-  - Core: The INT8-compatible MLP backbone running on 198 spectral bins.
-
-Covariance head outputs raw log-variance (log σ²).
-Caller applies exp() to get σ². Convention unchanged from Rev. 1.
-
-Changes from Rev. 1:
-  - head_cov weight: zeros_ → normal_(0, 0.01)
-      Restores gradient flow from covariance loss into the shared backbone.
-      zeros_ prevented the covariance branch from influencing trunk updates.
-  - head_cov bias: zeros_ → constant_(-2.0)
-      log σ² = -2.0 → σ² ≈ 0.135 at init, matching observed actual error ~0.15.
-      Previously init at 0.0 → σ² = 1.0, far above actual error, inflating R from
-      the first forward pass.
+    - Wrapper: Handles CPU-side FFT.
+    - Phase-Aware Extraction: Separates Real and Imaginary components to preserve
+        the sign of the DC bin (Gravity projection/Turn direction) and temporal phase.
+    - Core: Expanded 396-input MLP backbone.
 """
 import torch
 import torch.nn as nn
@@ -26,8 +16,8 @@ import torch.nn.functional as F
 class SpectralMLPNPU(nn.Module):
     def __init__(self):
         super().__init__()
-        # Shared backbone
-        self.fc1 = nn.Linear(198, 256)
+        # Expanded backbone to accept both Real and Imaginary components (6 channels * 66 = 396)
+        self.fc1 = nn.Linear(396, 256)
         self.bn1 = nn.BatchNorm1d(256)
         self.fc2 = nn.Linear(256, 128)
         self.bn2 = nn.BatchNorm1d(128)
@@ -45,12 +35,10 @@ class SpectralMLPNPU(nn.Module):
         self.bn_cov   = nn.BatchNorm1d(64)
         self.head_cov = nn.Linear(64, 3)
 
-        # Calibrated covariance init -- do not change
         nn.init.normal_(self.head_cov.weight, mean=0.0, std=0.01)
         nn.init.constant_(self.head_cov.bias, -2.0)
 
     def forward(self, x):
-        # Shared feature extraction -- no dropout on raw 198-bin input
         x = F.relu(self.bn1(self.fc1(x)))
         x = self.drop(x)
         x = F.relu(self.bn2(self.fc2(x)))
@@ -73,8 +61,19 @@ class SpectralMLP(nn.Module):
 
     def forward(self, x_raw):
         B = x_raw.size(0)
-        fft_c  = torch.fft.rfft(x_raw, dim=-1)
-        x_spec = torch.log1p(torch.abs(fft_c)).view(B, -1)
+        fft_c  = torch.fft.rfft(x_raw, dim=-1)  # (B, 6, 33) complex
+
+        # Isolate Real and Imaginary to preserve sign (direction) and phase (timing)
+        real_part = fft_c.real
+        imag_part = fft_c.imag
+
+        # Symmetric Log-Compression: sign(x) * log1p(abs(x))
+        # Preserves the polarity of the DC bins while compressing magnitude
+        real_scaled = torch.sign(real_part) * torch.log1p(torch.abs(real_part))
+        imag_scaled = torch.sign(imag_part) * torch.log1p(torch.abs(imag_part))
+
+        # Concatenate and flatten -> (B, 6, 66) -> (B, 396)
+        x_spec = torch.cat([real_scaled, imag_scaled], dim=-1).view(B, -1)
         return self.npu_core(x_spec)
 
 
