@@ -75,7 +75,7 @@ PRED_VEL_GAIN        = 1.00
 # Catastrophic divergence safeguards
 MAX_PRED_WORLD_SPEED_MPS = 999.0
 MAX_INNOVATION_NORM_MPS  = 999.0
-CAT_ATE_ABS_M            = 100.0
+CAT_ATE_ABS_M            = 1000.0  # Raised from 100.0 to allow gate rejections
 CAT_ATE_BEST_MULT        = 8.0
 CAT_STRIKE_LIMIT         = 10
 SOFT_ATE_BEST_MULT       = 2.0
