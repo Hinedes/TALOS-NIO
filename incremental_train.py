@@ -135,7 +135,11 @@ class ESKF:
         u_a = accel - self.ba
         u_g = gyro  - self.bg
         omega_z = float(u_g[2])
-        q_bvy_density = self._b_vy_q_straight if abs(omega_z) < self._b_vy_omega_gate else self._b_vy_q_sweep
+        v_horiz_sq = self.velocity[0]**2 + self.velocity[1]**2
+        if v_horiz_sq < 0.1:
+            q_bvy_density = self._b_vy_q_sweep * 5.0
+        else:
+            q_bvy_density = self._b_vy_q_straight if abs(omega_z) < self._b_vy_omega_gate else self._b_vy_q_sweep
         self.Q[15, 15] = q_bvy_density * dt
         aw  = R @ u_a + self.gravity
         self.position += self.velocity * dt + 0.5 * aw * dt**2
