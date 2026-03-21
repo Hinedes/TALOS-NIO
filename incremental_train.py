@@ -111,8 +111,17 @@ class ESKF:
         self.gyro_bias = self.bg
         self.gyro_meas = np.zeros(3)
         self.ba = np.zeros(3)
-        self.P  = np.eye(15) * 0.1
-        self.Q  = np.diag([1e-6]*3 + [1e-4]*3 + [1e-5]*3 + [1e-3]*3 + [1e-2]*3)
+        self.b_vy = 0.0
+        self.state_dim = 16
+        self._b_vy_beta = 1.0 / 300.0
+        self._b_vy_q_straight = 1e-8
+        self._b_vy_q_sweep = (0.01 ** 2)
+        self._b_vy_omega_gate = 0.2
+        self._r_vy_decay_steps_total = 50
+        self._r_vy_decay_steps_left = 0
+        self.P  = np.eye(self.state_dim) * 0.1
+        self.P[15, 15] = 0.25
+        self.Q  = np.diag([1e-6]*3 + [1e-4]*3 + [1e-5]*3 + [1e-3]*3 + [1e-2]*3 + [self._b_vy_q_straight * self.dt])
 
     @staticmethod
     def _skew(v):
@@ -125,17 +134,22 @@ class ESKF:
         dt, R = self.dt, self.orientation
         u_a = accel - self.ba
         u_g = gyro  - self.bg
+        omega_z = float(u_g[2])
+        q_bvy_density = self._b_vy_q_straight if abs(omega_z) < self._b_vy_omega_gate else self._b_vy_q_sweep
+        self.Q[15, 15] = q_bvy_density * dt
         aw  = R @ u_a + self.gravity
         self.position += self.velocity * dt + 0.5 * aw * dt**2
         self.velocity += aw * dt
+        self.b_vy *= np.exp(-self._b_vy_beta * dt)
         ang = np.linalg.norm(u_g) * dt
         if ang > 1e-9:
             self.orientation = R @ Rotation.from_rotvec(u_g * dt).as_matrix()
-        F = np.eye(15)
+        F = np.eye(self.state_dim)
         F[0:3, 3:6]   = np.eye(3) * dt
         F[3:6, 6:9]   = -R @ self._skew(u_a) * dt
         F[3:6, 12:15] = -R * dt
         F[6:9, 9:12]  = -R * dt
+        F[15, 15] = 1.0 - self._b_vy_beta * dt
         self.P = F @ self.P @ F.T + self.Q
         # SO(3) orthogonalization: prevent floating-point drift from corrupting rotation matrix
         U, _, Vt = np.linalg.svd(self.orientation)
@@ -144,7 +158,7 @@ class ESKF:
     def update_velocity(self, vel, R_obs, slap_threshold=5.0):
         """ESKF velocity update with Mahalanobis Slap Gate (threshold=5.0)."""
         if not np.all(np.isfinite(vel)): return False, 0.0
-        H = np.zeros((3, 15))
+        H = np.zeros((3, self.state_dim))
         H[0,3] = H[1,4] = H[2,5] = 1.0
 
         S     = H @ self.P @ H.T + R_obs
@@ -165,12 +179,12 @@ class ESKF:
         K = self.P @ H.T @ S_inv
 
         # OVERLORD QUARANTINE: orientation and biases zeroed at gain level
-        K[6:15, :] = 0.0
+        K[6:self.state_dim, :] = 0.0
 
         dx = np.clip(K @ r, -2.0, 2.0)
         self.position += dx[0:3]
         self.velocity += dx[3:6]
-        self.P = (np.eye(15) - K @ H) @ self.P
+        self.P = (np.eye(self.state_dim) - K @ H) @ self.P
         return True, mahal_sq
 
     def update_local_velocity(self, v_local_meas, R_obs, slap_threshold=5.0):
@@ -181,23 +195,32 @@ class ESKF:
             self._consec_rejects = 0
 
         v_local_pred = self.orientation.T @ self.velocity
-        y = v_local_meas - v_local_pred
+        v_local_pred_biased = v_local_pred.copy()
+        v_local_pred_biased[1] += self.b_vy
+        y = v_local_meas - v_local_pred_biased
 
-        H = np.zeros((3, 15))
+        H = np.zeros((3, self.state_dim))
         H[0:3, 3:6] = self.orientation.T
         H[0:3, 6:9] = self._skew(v_local_pred)
+        H[1, 15] = 1.0
 
-        S = H @ self.P @ H.T + R_obs
+        r_vy_mult = 1.0 + 2.0 * (self._r_vy_decay_steps_left / max(self._r_vy_decay_steps_total, 1))
+        R_eff = np.array(R_obs, dtype=np.float64, copy=True)
+        R_eff[1, 1] *= r_vy_mult
+
+        S = H @ self.P @ H.T + R_eff
         S_inv = np.linalg.inv(S)
 
         mahal_sq = float(y @ S_inv @ y)
-        R_inv = np.linalg.inv(R_obs)
+        R_inv = np.linalg.inv(R_eff)
         mahal_r_sq = float(y @ R_inv @ y)
         mahal_max = max(mahal_sq, mahal_r_sq)
 
         recovery_mult = min(1.0 + 0.5 * self._consec_rejects, 4.0)
         if mahal_max > (slap_threshold * recovery_mult) ** 2:
             self._consec_rejects += 1
+            self.P[15, 15] = 0.25
+            self._r_vy_decay_steps_left = self._r_vy_decay_steps_total
             return False, mahal_max
 
         K = self.P @ H.T @ S_inv
@@ -215,18 +238,22 @@ class ESKF:
         self.velocity += dx[3:6]
         self.orientation = self.orientation @ Rotation.from_rotvec(dx[6:9]).as_matrix()
         self.bg += np.clip(dx[9:12], -1e-4, 1e-4)
+        self.b_vy += float(dx[15])
 
-        I = np.eye(15)
+        I = np.eye(self.state_dim)
         IKH = I - K @ H
-        self.P = IKH @ self.P @ IKH.T + K @ R_obs @ K.T
+        self.P = IKH @ self.P @ IKH.T + K @ R_eff @ K.T
         self.P = 0.5 * (self.P + self.P.T)
+
+        if self._r_vy_decay_steps_left > 0:
+            self._r_vy_decay_steps_left -= 1
 
         self._consec_rejects = 0
 
         return True, mahal_max
 
     def update_zaru(self, gyro_raw):
-        H = np.zeros((3, 15))
+        H = np.zeros((3, self.state_dim))
         H[0:3, 9:12] = -np.eye(3)
         
         R_z = np.eye(3) * 1e-4
@@ -237,13 +264,13 @@ class ESKF:
         
         # ZARU quarantine: gyro stillness tells us nothing about pos, vel, ori, or accel bias
         K[0:9, :]  = 0.0
-        K[12:15, :] = 0.0
+        K[12:16, :] = 0.0
         
         dx = K @ z
         self.bg += dx[9:12] * 0.1
         
         # Joseph form: guarantees P stays symmetric and positive-definite
-        I   = np.eye(15)
+        I   = np.eye(self.state_dim)
         IKH = I - K @ H
         self.P = IKH @ self.P @ IKH.T + K @ R_z @ K.T
         self.P = 0.5 * (self.P + self.P.T)
@@ -268,7 +295,7 @@ class ESKF:
         # Residual: what the accel actually reads vs what we expect
         z = accel_corrected - g_body_expected
         
-        H = np.zeros((3, 15))
+        H = np.zeros((3, self.state_dim))
         # Orientation error observation (indices 6:9)
         # Linearization: d(R^T @ g)/d(delta_theta) = [R^T @ g]_x = skew(g_body_expected)
         H[0:3, 6:9] = self._skew(g_body_expected)
@@ -285,6 +312,7 @@ class ESKF:
         # Do not let accelerometer noise leak into position, velocity, or gyro bias
         K[0:6, :] = 0.0
         K[9:12, :] = 0.0
+        K[15, :] = 0.0
         
         dx = K @ z
         
@@ -296,7 +324,7 @@ class ESKF:
         # The Alpha Gate for accel bias: Dampen updates
         self.ba += dx[12:15] * 0.05
         
-        self.P = (np.eye(15) - K @ H) @ self.P
+        self.P = (np.eye(self.state_dim) - K @ H) @ self.P
 
     def update_laid_windowed_velocity(self, v_diff_meas, g1_mean, r,
                                       window_time, R_diag=0.2,
@@ -344,7 +372,7 @@ class ESKF:
             return False, 0.0
 
         # Jacobian: H = skew(r) * window_time, placed at gyro bias columns [9:12]
-        H = np.zeros((3, 15), dtype=np.float64)
+        H = np.zeros((3, self.state_dim), dtype=np.float64)
         H[0:3, 9:12] = self._skew(r) * window_time
 
         R_obs = np.eye(3, dtype=np.float64) * R_diag
@@ -353,7 +381,7 @@ class ESKF:
 
         # Quarantine: gyro bias states only
         K[0:9, :] = 0.0
-        K[12:15, :] = 0.0
+        K[12:16, :] = 0.0
 
         dx = K @ y
         dx_bg = np.clip(dx[9:12], -bg_clamp, bg_clamp)
@@ -362,7 +390,7 @@ class ESKF:
         self.bg += dx_bg
 
         # Joseph form
-        I = np.eye(15)
+        I = np.eye(self.state_dim)
         IKH = I - K @ H
         self.P = IKH @ self.P @ IKH.T + K @ R_obs @ K.T
         self.P = 0.5 * (self.P + self.P.T)
@@ -393,7 +421,7 @@ class ESKF:
         y = float(delta_a_y_meas - h)
 
         # Jacobian into gyro-bias x and z for this state layout [9:12]
-        H = np.zeros((1, 15))
+        H = np.zeros((1, self.state_dim))
         H[0, 9] = 2 * LEVER_ARM * omega_hat[0]
         H[0, 11] = 2 * LEVER_ARM * omega_hat[2]
 
@@ -417,7 +445,7 @@ class ESKF:
         self.gyro_bias[2] += dx[11]
 
         # Joseph form covariance update
-        I = np.eye(15)
+        I = np.eye(self.state_dim)
         IKH = I - K_clean @ H
         self.P = IKH @ self.P @ IKH.T + K_clean @ R @ K_clean.T
         self.P = 0.5 * (self.P + self.P.T)
@@ -431,7 +459,7 @@ class ESKF:
         """
         if trust < 0.15:
             return False  # weak signal, skip
-        H = np.zeros((1, 15))
+        H = np.zeros((1, self.state_dim))
         H[0, 11] = -1.0  # h(x)=gyro_z_raw-bg_z -> dh/dbg_z = -1
         # Residual: LAID yaw rate vs bias-corrected gyro yaw [rad/s vs rad/s]
         z = np.array([omega_yaw_obs - (gyro_z_raw - self.bg[2])])
@@ -439,12 +467,12 @@ class ESKF:
         S = H @ self.P @ H.T + R_yaw
         K = self.P @ H.T / S[0, 0]
         # Isolate to gyro bias Z only
-        K_masked = np.zeros(15)
+        K_masked = np.zeros(self.state_dim)
         K_masked[11] = K[11].item()
         dx = K_masked * z[0]
         dx[11] = np.clip(dx[11], -0.01, 0.01)  # limit bias correction [rad/s]
         self.bg[2] += dx[11]
-        self.P = (np.eye(15) - np.outer(K_masked, H[0])) @ self.P
+        self.P = (np.eye(self.state_dim) - np.outer(K_masked, H[0])) @ self.P
         return True
 
     def update_laid_differential(self, a1, g1, a2, r, R_laid=None,
@@ -482,7 +510,7 @@ class ESKF:
             return False, 0.0, 0.0, 0.0
 
         H_bg = (2.0 / r_norm) * ((r_norm ** 2) * omega - omega_dot_r * r)
-        H = np.zeros((1, 15), dtype=np.float64)
+        H = np.zeros((1, self.state_dim), dtype=np.float64)
         H[0, 9:12] = H_bg
 
         R_scalar = float(LAID_DIFF_R_DIAG if R_laid is None else R_laid)
@@ -497,14 +525,14 @@ class ESKF:
 
         K = (self.P @ H.T) / S_val
         K[0:9, :] = 0.0
-        K[12:15, :] = 0.0
+        K[12:16, :] = 0.0
 
         dx = (K[:, 0] * y)
         dx_bg = np.clip(dx[9:12], -1e-4, 1e-4)
         bg_before = self.bg.copy()
         self.bg += dx_bg
 
-        I = np.eye(15)
+        I = np.eye(self.state_dim)
         IKH = I - K @ H
         Rm = np.array([[R_scalar]], dtype=np.float64)
         self.P = IKH @ self.P @ IKH.T + K @ Rm @ K.T
