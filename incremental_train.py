@@ -1321,7 +1321,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--manifest', default='Nymeria_download_urls.json')
     parser.add_argument('--root',     default='/mnt/c/TALOS/nymeria')
-    parser.add_argument('--golden',   default='/mnt/c/TALOS/golden')
+    parser.add_argument('--golden',   default='/home/iclab/TALOS/golden')
     parser.add_argument('--seed',     type=int, default=1337)
     args = parser.parse_args()
 
