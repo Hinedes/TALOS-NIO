@@ -115,12 +115,12 @@ class ESKF:
         self.state_dim = 16
         self._b_vy_beta = 1.0 / 300.0
         self._b_vy_q_straight = 1e-8
-        self._b_vy_q_sweep = (0.01 ** 2)
+        self._b_vy_q_sweep = (0.003 ** 2)
         self._b_vy_omega_gate = 0.2
         self._r_vy_decay_steps_total = 50
         self._r_vy_decay_steps_left = 0
         self.P  = np.eye(self.state_dim) * 0.1
-        self.P[15, 15] = 0.25
+        self.P[15, 15] = 0.005
         self.Q  = np.diag([1e-6]*3 + [1e-4]*3 + [1e-5]*3 + [1e-3]*3 + [1e-2]*3 + [self._b_vy_q_straight * self.dt])
 
     @staticmethod
@@ -137,7 +137,7 @@ class ESKF:
         omega_z = float(u_g[2])
         v_horiz_sq = self.velocity[0]**2 + self.velocity[1]**2
         if v_horiz_sq < 0.1:
-            q_bvy_density = self._b_vy_q_sweep * 5.0
+            q_bvy_density = self._b_vy_q_straight
         else:
             q_bvy_density = self._b_vy_q_straight if abs(omega_z) < self._b_vy_omega_gate else self._b_vy_q_sweep
         self.Q[15, 15] = q_bvy_density * dt
