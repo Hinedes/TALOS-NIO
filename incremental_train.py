@@ -220,13 +220,12 @@ class ESKF:
         mahal_r_sq = float(y @ R_inv @ y)
         mahal_max = max(mahal_sq, mahal_r_sq)
 
-        # DISABLE SLAP GATE FOR DIAGNOSTICS:
-        # recovery_mult = min(1.0 + 0.5 * self._consec_rejects, 4.0)
-        # if mahal_max > (slap_threshold * recovery_mult) ** 2:
-        #     self._consec_rejects += 1
-        #     self.P[15, 15] = 0.25
-        #     self._r_vy_decay_steps_left = self._r_vy_decay_steps_total
-        #     return False, mahal_max
+        recovery_mult = min(1.0 + 0.5 * self._consec_rejects, 4.0)
+        if mahal_max > (slap_threshold * recovery_mult) ** 2:
+            self._consec_rejects += 1
+            self.P[15, 15] = 0.25
+            self._r_vy_decay_steps_left = self._r_vy_decay_steps_total
+            return False, mahal_max
 
         K = self.P @ H.T @ S_inv
         K[12:15, :] = 0.0   # accel bias quarantined -- speed ratio still 0.28, premature update destroys propagation
@@ -639,21 +638,32 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
     def loss_fn(pt, pcov, gt):
         var = torch.exp(pcov)
 
+        # 1. Geometric Kinetics
         pred_norm = pt.norm(dim=-1)
         gt_norm = gt.norm(dim=-1)
         loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-8)).unsqueeze(-1)
 
-        # Absolute Anchor
-        loss_mag = F.huber_loss(pred_norm, gt_norm, delta=0.15)
+        # Option B: The Gentle Ratio Anchor (Masked)
+        mask = gt_norm > 0.05
+        if mask.any():
+            speed_ratio = pred_norm[mask] / gt_norm[mask]
+            # Dimensionless penalty to prevent systematic scaling bias
+            loss_mag_raw = F.huber_loss(speed_ratio, torch.ones_like(speed_ratio), delta=0.15, reduction='none')
+            loss_mag = torch.zeros_like(gt_norm)
+            loss_mag[mask] = loss_mag_raw
+        else:
+            loss_mag = torch.zeros_like(gt_norm)
 
+        # 2. Uncertainty Calibration
         mse_detached = (pt.detach() - gt) ** 2
         nll = 0.5 * (pcov + mse_detached / var)
 
+        # Speed-weighting applied ONLY to NLL and direction
         weight = 1.0 + 10.0 * gt_norm.unsqueeze(-1)
         scale_loss = nll + 0.05 * loss_dir
 
-        # 0.1 weight, unscaled by the speed weight
-        return torch.mean(weight * scale_loss) + 0.1 * loss_mag
+        # The magnitude ratio is unweighted and constrained by a low lambda
+        return torch.mean(weight * scale_loss) + 0.05 * torch.mean(loss_mag)
 
     for epoch in range(epochs):
         model.train()
