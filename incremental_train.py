@@ -638,32 +638,24 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
     def loss_fn(pt, pcov, gt):
         var = torch.exp(pcov)
 
-        # 1. Geometric Kinetics
-        pred_norm = pt.norm(dim=-1)
-        gt_norm = gt.norm(dim=-1)
-        loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-8)).unsqueeze(-1)
+        # 1. The Translation Head: Pure Kinematic MSE
+        # pt is NOT detached here. This delivers a massive, unambiguous gradient
+        # directly to `head_trans` to obliterate the 64-degree direction error
+        # and the 3.3x magnitude over-prediction simultaneously.
+        loss_kinematic = (pt - gt) ** 2
 
-        # Option B: The Gentle Ratio Anchor (Masked)
-        mask = gt_norm > 0.05
-        if mask.any():
-            speed_ratio = pred_norm[mask] / gt_norm[mask]
-            # Dimensionless penalty to prevent systematic scaling bias
-            loss_mag_raw = F.huber_loss(speed_ratio, torch.ones_like(speed_ratio), delta=0.15, reduction='none')
-            loss_mag = torch.zeros_like(gt_norm)
-            loss_mag[mask] = loss_mag_raw
-        else:
-            loss_mag = torch.zeros_like(gt_norm)
-
-        # 2. Uncertainty Calibration
+        # 2. The Covariance Head: Uncertainty Calibration
+        # pt IS detached here. The NLL ONLY flows back to `head_cov`.
+        # The covariance head must map the uncertainty of the translation head's
+        # output, but it cannot manipulate the translation head to cheat the math.
         mse_detached = (pt.detach() - gt) ** 2
-        nll = 0.5 * (pcov + mse_detached / var)
+        loss_nll = 0.5 * (pcov + mse_detached / var)
 
-        # Speed-weighting applied ONLY to NLL and direction
-        weight = 1.0 + 10.0 * gt_norm.unsqueeze(-1)
-        scale_loss = nll + 0.05 * loss_dir
+        # Global speed-weighting applied to both heads equally
+        weight = 1.0 + 10.0 * gt.norm(dim=-1).unsqueeze(-1)
 
-        # The magnitude ratio is unweighted and constrained by a low lambda
-        return torch.mean(weight * scale_loss) + 0.05 * torch.mean(loss_mag)
+        # The heads are trained simultaneously but independently.
+        return torch.mean(weight * (loss_kinematic + loss_nll))
 
     for epoch in range(epochs):
         model.train()
