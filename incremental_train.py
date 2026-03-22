@@ -637,43 +637,22 @@ def train_round(model, opt, sched, train_data, val_data, device, epochs, checkpo
 
     def loss_fn(pt, pcov, gt):
         var = torch.exp(pcov)
-        
-        # 1. Geometric Kinetics (Trains ONLY the Translation Branch)
+
         pred_norm = pt.norm(dim=-1)
         gt_norm = gt.norm(dim=-1)
         loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-8)).unsqueeze(-1)
 
-        # Option A: Magnitude Anchoring Loss (Masked & Speed-Weighted)
-        # Mask out near-stationary frames to prevent noisy ratios and division by zero.
-        mask = gt_norm > 0.05
-        if mask.any():
-            speed_ratio = pred_norm[mask] / gt_norm[mask]
-            # Delta 0.15 provides a wider quadratic safe-zone for GT label noise
-            loss_mag_raw = F.huber_loss(speed_ratio, torch.ones_like(speed_ratio), delta=0.15, reduction='none')
+        # Absolute Anchor
+        loss_mag = F.huber_loss(pred_norm, gt_norm, delta=0.15)
 
-            # Create a full-batch magnitude loss tensor
-            loss_mag = torch.zeros_like(gt_norm)
-            loss_mag[mask] = loss_mag_raw
-        else:
-            loss_mag = torch.zeros_like(gt_norm)
-        
-        # 2. Uncertainty Calibration (Trains ONLY the Covariance Branch)
         mse_detached = (pt.detach() - gt) ** 2
         nll = 0.5 * (pcov + mse_detached / var)
-        
-        # Global speed-weighting applied to ALL loss terms equally
+
         weight = 1.0 + 10.0 * gt_norm.unsqueeze(-1)
-        
-        lambda_dir = 0.05
-        lambda_mag = 1.0 # Effective weight is now matched with NLL via the equation below
+        scale_loss = nll + 0.05 * loss_dir
 
-        # Sum the dimensional NLL and directional losses
-        scale_loss = nll + lambda_dir * loss_dir
-
-        # Apply weighting and combine
-        final_loss = torch.mean(weight * scale_loss) + lambda_mag * torch.mean(weight.squeeze(-1) * loss_mag)
-
-        return final_loss
+        # 0.1 weight, unscaled by the speed weight
+        return torch.mean(weight * scale_loss) + 0.1 * loss_mag
 
     for epoch in range(epochs):
         model.train()
