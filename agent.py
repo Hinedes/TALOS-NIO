@@ -4,8 +4,23 @@ import re
 from pathlib import Path
 from smolagents import CodeAgent, OpenAIModel, tool
 
-# 1. Define the single strict boundary
-BASE_DIR = Path(r"C:\TALOS").resolve()
+# 1. Define the single strict boundary (detect WSL vs Windows)
+def _get_base_dir() -> Path:
+    """Auto-detect whether running in WSL and return correct BASE_DIR."""
+    try:
+        # Check if running in WSL: /proc/version contains 'microsoft' or 'wsl'
+        with open('/proc/version', 'r') as f:
+            content = f.read().lower()
+            if 'microsoft' in content or 'wsl' in content:
+                # WSL: use Linux path
+                return Path.home() / "TALOS"
+    except FileNotFoundError:
+        pass
+    
+    # Windows or unable to detect WSL: use Windows path
+    return Path(r"C:\TALOS").resolve()
+
+BASE_DIR = _get_base_dir().resolve()
 
 def is_path_safe(requested_path: str) -> bool:
     try:
