@@ -47,6 +47,7 @@ from nymeria_loader import (load_sequence, load_sequence_cached, load_imu_stream
                             load_gt_trajectory, interpolate_gt,
                             SID_RIGHT, SID_LEFT, TARGET_HZ)
 from telemetry import append_eval_csv, generate_diagnostic_dashboard
+from reporting import publish_training_summary
 
 # Configuration
 PATIENCE               = 30      # ESKF ATE strikes before halting (physical overfitting)
@@ -1570,27 +1571,17 @@ def main():
         print(f"   Best ATE : {best_ate_ever:.3f}m")
         print(f"   Achieved : Round {best_ate_round}")
         print(f"   Checkpoint : golden/talos_best_physical.pth")
-        status_msg = f"TALOS done. Best ATE: {best_ate_ever:.3f}m @ Round {best_ate_round}/{round_idx}"
-        notion_ate = str(round(best_ate_ever, 3))
-        notion_round = str(best_ate_round)
     else:
         print("   Best ATE : N/A (no valid physical checkpoint this run)")
         print("   Achieved : N/A")
         print("   Checkpoint : N/A")
-        status_msg = f"TALOS done. No valid physical checkpoint in run {run_dir.name}."
-        notion_ate = "nan"
-        notion_round = "-1"
-    import subprocess
-    subprocess.run(["curl", "-s", "-d",
-        status_msg,
-        "ntfy.sh/talos-aman-lab"], capture_output=True)
-    import subprocess
-    subprocess.run(["python3", "notion_logger.py",
-        "--ate",   notion_ate,
-        "--round", notion_round,
-        "--total", str(round_idx),
-        "--run", run_dir.name],
-        cwd="/mnt/c/TALOS")
+
+    publish_training_summary(
+        best_ate=float(best_ate_ever),
+        best_round=int(best_ate_round),
+        total_rounds=int(round_idx),
+        run_name=run_dir.name,
+    )
 
 if __name__ == '__main__':
     main()

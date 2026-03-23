@@ -62,6 +62,16 @@ def _get_llama_api_base() -> str:
     return "http://127.0.0.1:8080/v1"
 
 BASE_DIR = _get_base_dir().resolve()
+CONTROLLER_FILE = (BASE_DIR / "talos_controller.py").resolve()
+RESULTS_FILE = (BASE_DIR / "ea_results.tsv").resolve()
+ATTEMPT_LOG_DIR = (BASE_DIR / "golden" / "ea_attempt_logs").resolve()
+
+# Session state to enforce keep/discard behavior with rollback.
+_SESSION = {
+    "attempt": 0,
+    "best_ate_m": None,
+    "last_good_controller": None,
+}
 
 def is_path_safe(requested_path: str) -> bool:
     try:
@@ -69,6 +79,58 @@ def is_path_safe(requested_path: str) -> bool:
         return target.is_relative_to(BASE_DIR)
     except Exception:
         return False
+
+
+def _init_ledger() -> None:
+    if RESULTS_FILE.exists():
+        return
+    header = "attempt\tbest_ate_m\tlatest_eskf_ate_m\tslap_rate_pct\tbest_round\tstatus\tnote\n"
+    RESULTS_FILE.write_text(header, encoding='utf-8')
+
+
+def _append_ledger_row(
+    attempt: int,
+    best_ate_m: float | None,
+    latest_eskf_ate_m: float | None,
+    slap_rate_pct: float | None,
+    best_round: int | None,
+    status: str,
+    note: str,
+) -> None:
+    _init_ledger()
+    row = (
+        f"{attempt}\t"
+        f"{'' if best_ate_m is None else f'{best_ate_m:.6f}'}\t"
+        f"{'' if latest_eskf_ate_m is None else f'{latest_eskf_ate_m:.6f}'}\t"
+        f"{'' if slap_rate_pct is None else f'{slap_rate_pct:.4f}'}\t"
+        f"{'' if best_round is None else best_round}\t"
+        f"{status}\t"
+        f"{note.replace('\t', ' ').replace('\n', ' ').strip()}\n"
+    )
+    with open(RESULTS_FILE, 'a', encoding='utf-8') as f:
+        f.write(row)
+
+
+def _extract_slap_rate_pct(log_text: str) -> float | None:
+    matches = re.findall(r"Slap_Rate:\s*([0-9]+(?:\.[0-9]+)?)%", log_text)
+    if not matches:
+        return None
+    return float(matches[-1])
+
+
+def _write_attempt_log(attempt: int, stdout_text: str, stderr_text: str, return_code: int) -> Path:
+    ATTEMPT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = ATTEMPT_LOG_DIR / f"attempt_{attempt:04d}.log"
+    payload = [
+        f"attempt={attempt}",
+        f"return_code={return_code}",
+        "--- STDOUT ---",
+        stdout_text or "",
+        "--- STDERR ---",
+        stderr_text or "",
+    ]
+    log_path.write_text("\n".join(payload), encoding='utf-8')
+    return log_path
 
 # 2. Define locked-down tools
 @tool
@@ -102,7 +164,15 @@ def write_safe(filepath: str, content: str) -> str:
     """
     if not is_path_safe(filepath):
         return f"Access Denied: Cannot write to {filepath}."
+
+    # AutoResearch-style mutation lock: only mutate the controller file.
+    target = Path(filepath).resolve()
+    if target != CONTROLLER_FILE:
+        return f"Access Denied: Only {CONTROLLER_FILE} is mutable."
+
     try:
+        if CONTROLLER_FILE.exists():
+            _SESSION["last_good_controller"] = CONTROLLER_FILE.read_text(encoding='utf-8')
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
         return f"Successfully updated {filepath}."
@@ -168,6 +238,129 @@ def parse_training_log(log_text: str) -> str:
 
     return json.dumps(payload, ensure_ascii=True)
 
+
+@tool
+def run_scored_experiment(note: str = "") -> str:
+    """Run one experiment, score it, and auto keep/discard with rollback.
+
+    Rules:
+    - First valid run establishes baseline and is kept.
+    - Later runs are kept only if best_ate_m improves and slap_rate_pct <= 1.0 (if present).
+    - Non-improving runs are automatically rolled back to last good controller.
+
+    Args:
+        note: Short description of mutation idea.
+
+    Returns:
+        JSON with attempt result and current best score.
+    """
+    import subprocess
+
+    _SESSION["attempt"] += 1
+    attempt = int(_SESSION["attempt"])
+
+    try:
+        result = subprocess.run(
+            ["uv", "run", "train.py"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(BASE_DIR),
+        )
+        raw_log = result.stdout
+        stderr_log = result.stderr or ""
+        return_code = int(result.returncode)
+    except subprocess.CalledProcessError as e:
+        raw_log = f"Training crashed. Error log:\n{e.stderr}\nOutput log:\n{e.stdout}"
+        stderr_log = e.stderr or ""
+        return_code = int(e.returncode)
+
+    attempt_log_path = _write_attempt_log(
+        attempt=attempt,
+        stdout_text=raw_log,
+        stderr_text=stderr_log,
+        return_code=return_code,
+    )
+
+    parsed = json.loads(parse_training_log(raw_log))
+    slap_rate_pct = _extract_slap_rate_pct(raw_log)
+    parsed["slap_rate_pct"] = slap_rate_pct
+
+    best_ate_m = parsed.get("best_ate_m")
+    ok = bool(parsed.get("ok")) and best_ate_m is not None
+    crashed = bool(parsed.get("training_crashed"))
+
+    current_best = _SESSION.get("best_ate_m")
+    keep = False
+    status = "discard"
+
+    if ok and current_best is None:
+        keep = True
+        status = "baseline"
+    elif ok:
+        improved = bool(best_ate_m < current_best)
+        slap_ok = bool(slap_rate_pct is None or slap_rate_pct <= 1.0)
+        keep = improved and slap_ok
+        status = "keep" if keep else "discard"
+    else:
+        status = "crash" if crashed else "invalid"
+
+    if keep:
+        _SESSION["best_ate_m"] = float(best_ate_m)
+        _SESSION["last_good_controller"] = CONTROLLER_FILE.read_text(encoding='utf-8')
+    else:
+        last_good = _SESSION.get("last_good_controller")
+        if last_good is not None:
+            CONTROLLER_FILE.write_text(last_good, encoding='utf-8')
+
+    _append_ledger_row(
+        attempt=attempt,
+        best_ate_m=best_ate_m,
+        latest_eskf_ate_m=parsed.get("latest_eskf_ate_m"),
+        slap_rate_pct=slap_rate_pct,
+        best_round=parsed.get("best_round"),
+        status=status,
+        note=note,
+    )
+
+    return json.dumps(
+        {
+            "attempt": attempt,
+            "status": status,
+            "kept": keep,
+            "best_ate_m": _SESSION.get("best_ate_m"),
+            "run_best_ate_m": best_ate_m,
+            "latest_eskf_ate_m": parsed.get("latest_eskf_ate_m"),
+            "slap_rate_pct": slap_rate_pct,
+            "training_crashed": crashed,
+            "results_file": str(RESULTS_FILE),
+            "attempt_log_file": str(attempt_log_path),
+        },
+        ensure_ascii=True,
+    )
+
+
+@tool
+def get_ea_status() -> str:
+    """Return AutoResearch session status and latest ledger entries as JSON."""
+    _init_ledger()
+    tail = []
+    try:
+        lines = RESULTS_FILE.read_text(encoding='utf-8').splitlines()
+        tail = lines[-6:]
+    except Exception:
+        tail = []
+
+    return json.dumps(
+        {
+            "attempt": _SESSION.get("attempt", 0),
+            "best_ate_m": _SESSION.get("best_ate_m"),
+            "results_file": str(RESULTS_FILE),
+            "recent_rows": tail,
+        },
+        ensure_ascii=True,
+    )
+
 # 3. Read your custom system prompt
 with open(BASE_DIR / "system.txt", "r", encoding="utf-8") as f:
     custom_instructions = f.read()
@@ -181,7 +374,14 @@ model = OpenAIModel(
 
 # 5. Initialize the agent
 agent = CodeAgent(
-    tools=[read_safe, write_safe, run_training, parse_training_log],
+    tools=[
+        read_safe,
+        write_safe,
+        run_training,
+        parse_training_log,
+        run_scored_experiment,
+        get_ea_status,
+    ],
     model=model,
     stream_outputs=True
 )
@@ -193,10 +393,10 @@ prompt = f"""
 YOUR MISSION:
 1. Read `program.md` to understand your goals and constraints. 
 2. Use `read_safe` to examine `talos_controller.py`.
-3. Run `run_training` to establish your baseline ATE.
-4. Parse every `run_training` output with `parse_training_log` and use only parsed JSON fields for decisions.
-5. Modify ONLY `talos_controller.py` to lower the ATE.
-6. If Slap_Rate exceeds 1.0%, you must adjust your thresholds or loss.
+3. For every attempt, after editing, call `run_scored_experiment(note=...)`.
+4. Do NOT decide keep/discard yourself; trust `run_scored_experiment` status.
+5. The controller is auto-rolled-back on discard/crash.
+6. Use `get_ea_status` to track running best and recent results.
 7. Iterate until you beat the 4.047 baseline.
 """
 
