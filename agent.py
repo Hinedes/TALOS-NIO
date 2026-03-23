@@ -98,6 +98,7 @@ def _append_ledger_row(
     note: str,
 ) -> None:
     _init_ledger()
+    clean_note = note.replace('\t', ' ').replace('\n', ' ').strip()
     row = (
         f"{attempt}\t"
         f"{'' if best_ate_m is None else f'{best_ate_m:.6f}'}\t"
@@ -105,7 +106,7 @@ def _append_ledger_row(
         f"{'' if slap_rate_pct is None else f'{slap_rate_pct:.4f}'}\t"
         f"{'' if best_round is None else best_round}\t"
         f"{status}\t"
-        f"{note.replace('\t', ' ').replace('\n', ' ').strip()}\n"
+        f"{clean_note}\n"
     )
     with open(RESULTS_FILE, 'a', encoding='utf-8') as f:
         f.write(row)
