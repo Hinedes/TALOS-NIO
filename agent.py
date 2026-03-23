@@ -119,7 +119,7 @@ with open(BASE_DIR / "system.txt", "r", encoding="utf-8") as f:
 # 4. Initialize the model with the mandatory parameters
 model = OpenAIModel(
     model_id="OmniClaw-V2-Q8_0",
-    api_base="http://127.0.0.1:8080/v1",
+    api_base="http://192.168.176.1:8080/v1",
     api_key="sk-no-key-required"
 )
 
