@@ -20,6 +20,40 @@ def _get_base_dir() -> Path:
     # Windows or unable to detect WSL: use Windows path
     return Path(r"C:\TALOS").resolve()
 
+
+def _is_wsl() -> bool:
+    """Return True when running inside WSL."""
+    try:
+        with open('/proc/version', 'r', encoding='utf-8') as f:
+            content = f.read().lower()
+            return 'microsoft' in content or 'wsl' in content
+    except FileNotFoundError:
+        return False
+
+
+def _get_llama_api_base() -> str:
+    """Resolve llama-server base URL with env override and WSL-aware fallback."""
+    # Highest priority: explicit override for custom network setups.
+    explicit_base = os.environ.get("LLAMA_API_BASE", "").strip()
+    if explicit_base:
+        return explicit_base
+
+    if _is_wsl():
+        # In WSL, the first nameserver in /etc/resolv.conf is usually the Windows host.
+        try:
+            with open('/etc/resolv.conf', 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('nameserver '):
+                        windows_host_ip = line.split()[1].strip()
+                        return f"http://{windows_host_ip}:8080/v1"
+        except Exception:
+            pass
+
+        # Fallback for distros where this host alias is available.
+        return "http://host.wsl.internal:8080/v1"
+
+    return "http://127.0.0.1:8080/v1"
+
 BASE_DIR = _get_base_dir().resolve()
 
 def is_path_safe(requested_path: str) -> bool:
@@ -134,7 +168,7 @@ with open(BASE_DIR / "system.txt", "r", encoding="utf-8") as f:
 # 4. Initialize the model with the mandatory parameters
 model = OpenAIModel(
     model_id="OmniClaw-V2-Q8_0",
-    api_base="http://host.wsl.internal:8080/v1",
+    api_base=_get_llama_api_base(),
     api_key="sk-no-key-required"
 )
 
