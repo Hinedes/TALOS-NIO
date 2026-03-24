@@ -1450,7 +1450,7 @@ def main():
 
     torch.set_float32_matmul_precision('medium')  # TF32 on tensor cores
     model      = SpectralMLP().to(device)
-    model      = torch.compile(model)              # Dynamo JIT compilation
+    model.npu_core = torch.compile(model.npu_core) # Compile ONLY the MLP, leave FFT eager
     opt        = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
     sched      = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=3, min_lr=1e-5)
     train_data = None
