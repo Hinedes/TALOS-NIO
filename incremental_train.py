@@ -15,6 +15,7 @@ Each round:
 
 from bulwark import bulwark
 import argparse
+from collections import deque
 import json
 import os
 import shutil
@@ -740,8 +741,10 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
     laid_bouncer = LAIDBouncer()
     npp_tracker  = NPPTracker()
     halo = HALOObserver(init_rot)
-    accel_buf, gyro_buf = [], []
-    accel2_buf, gyro2_buf = [], []
+    accel_buf  = deque(maxlen=WINDOW_SIZE)
+    gyro_buf   = deque(maxlen=WINDOW_SIZE)
+    accel2_buf = deque(maxlen=WINDOW_SIZE)
+    gyro2_buf  = deque(maxlen=WINDOW_SIZE)
     talos_positions, talos_positions_nocage, pure_positions = [], [], []
     window_time = WINDOW_SIZE * dt
 
@@ -880,12 +883,6 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         gyro_buf.append(g)
         accel2_buf.append(accel2[step])
         gyro2_buf.append(gyro2[step])
-
-        if len(accel_buf) > WINDOW_SIZE:
-            accel_buf.pop(0)
-            gyro_buf.pop(0)
-            accel2_buf.pop(0)
-            gyro2_buf.pop(0)
 
         # 10Hz Neural Correction (TALOS only)
         if len(accel_buf) == WINDOW_SIZE and step % 10 == 0:
@@ -1093,8 +1090,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 })
         # ZARU (TALOS only)
         if len(gyro_buf) >= ZARU_WINDOW and step % ZARU_WINDOW == 0:
-            gyro_var = np.var(np.array(gyro_buf[-ZARU_WINDOW:]), axis=0).sum()
-            accel_var = np.var(np.array(accel_buf[-ZARU_WINDOW:]), axis=0).sum()
+            gyro_var = np.var(np.array(list(gyro_buf)[-ZARU_WINDOW:]), axis=0).sum()
+            accel_var = np.var(np.array(list(accel_buf)[-ZARU_WINDOW:]), axis=0).sum()
             
             # Dual-sensor lock to prevent false positives during slow motion
             if gyro_var < ZARU_THRESHOLD and accel_var < ZARU_ACCEL_THRESHOLD:
@@ -1110,8 +1107,8 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
         # During walking, the accelerometer is NOT a gravity sensor -- it measures
         # footstrike impacts and head bob. CAU must NOT fire during motion.
         if len(gyro_buf) >= ZARU_WINDOW and step % ZARU_WINDOW == 0:
-            gyro_var_cau = np.var(np.array(gyro_buf[-ZARU_WINDOW:]), axis=0).sum()
-            accel_var_cau = np.var(np.array(accel_buf[-ZARU_WINDOW:]), axis=0).sum()
+            gyro_var_cau = np.var(np.array(list(gyro_buf)[-ZARU_WINDOW:]), axis=0).sum()
+            accel_var_cau = np.var(np.array(list(accel_buf)[-ZARU_WINDOW:]), axis=0).sum()
             # Strictest threshold: match ZARU exactly.
             if gyro_var_cau < ZARU_THRESHOLD and accel_var_cau < ZARU_ACCEL_THRESHOLD:
                 eskf_talos.update_cau(a, accel_var_cau)
@@ -1451,7 +1448,9 @@ def main():
     val_data = load_sequence_cached(val_seq_path, augment=False)
     print(f"  Val Sequence loaded. Duration: {len(val_df)*ESKF_DT:.1f}s")
 
+    torch.set_float32_matmul_precision('medium')  # TF32 on tensor cores
     model      = SpectralMLP().to(device)
+    model      = torch.compile(model)              # Dynamo JIT compilation
     opt        = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
     sched      = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=3, min_lr=1e-5)
     train_data = None
