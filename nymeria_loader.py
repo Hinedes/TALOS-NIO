@@ -155,7 +155,7 @@ def make_windows(imu1, imu2, pos, quat, window, stride, augment=True):
         'quat':          np.stack(quat_labels).astype(np.float32),
     }
 
-def load_sequence(sequence_root: str | Path, window: int = WINDOW_SIZE, stride: int = STRIDE, target_hz: float = TARGET_HZ, augment: bool = True) -> dict:
+def _parse_vrs_to_arrays(sequence_root: str | Path, target_hz: float = TARGET_HZ):
     root = Path(sequence_root)
     vrs_path  = root / 'data' / 'motion.vrs'
     traj_path = root / 'mps' / 'slam' / 'closed_loop_trajectory.csv'
@@ -194,12 +194,17 @@ def load_sequence(sequence_root: str | Path, window: int = WINDOW_SIZE, stride: 
     quat_at_imu = quat_at_imu[mask]
     print(f"[nymeria_loader] Trimmed to GT coverage : {len(grid_ns)} samples remaining")
 
+    return imu1_reg, imu2_reg, pos_at_imu, quat_at_imu, grid_ns
+
+
+def load_sequence(sequence_root: str | Path, window: int = WINDOW_SIZE, stride: int = STRIDE, target_hz: float = TARGET_HZ, augment: bool = True) -> dict:
+    imu1_reg, imu2_reg, pos_at_imu, quat_at_imu, grid_ns = _parse_vrs_to_arrays(sequence_root, target_hz)
+
     print(f"[nymeria_loader] Windowing (size={window}, stride={stride}, augment={augment})...")
     result = make_windows(imu1_reg, imu2_reg, pos_at_imu, quat_at_imu, window, stride, augment=augment)
 
     duration_s = (grid_ns[-1] - grid_ns[0]) / 1e9
     print(f"[nymeria_loader] Done : {len(result['trans'])} windows from {duration_s:.1f}s")
-
     return result
 
 if __name__ == '__main__':
@@ -229,14 +234,24 @@ CACHE_DIR = Path('/mnt/c/TALOS/golden/cache')
 def load_sequence_cached(sequence_root: str | Path, window: int = WINDOW_SIZE,
                          stride: int = STRIDE, augment: bool = True) -> dict:
     root   = Path(sequence_root)
-    seq_id = root.parent.name if root.name == "recording_head" else root.name          # e.g. Nymeria_v0.0_..._recording_head -> parent
+    # Handle paths ending in 'recording_head' or ending directly in sequence IDs
+    seq_id = root.parent.name if root.name == "recording_head" else root.name
     cache  = CACHE_DIR / f"{seq_id}.npz"
 
     if cache.exists():
         print(f"[cache] HIT {seq_id[:40]}")
         d = np.load(cache)
-        return make_windows(d['imu1'], d['imu2'], d['pos'], d['quat'],
-                            window, stride, augment=augment)
+        imu1_reg = d['imu1']
+        imu2_reg = d['imu2']
+        pos_at_imu = d['pos']
+        quat_at_imu = d['quat']
+    else:
+        print(f"[cache] MISS {seq_id[:40]} -- compiling from VRS")
+        imu1_reg, imu2_reg, pos_at_imu, quat_at_imu, grid_ns = _parse_vrs_to_arrays(sequence_root, target_hz=TARGET_HZ)
+        
+        # Save cache so it never misses again!
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(cache, imu1=imu1_reg, imu2=imu2_reg, pos=pos_at_imu, quat=quat_at_imu)
+        print(f"[cache] SAVED new sequence to disk!")
 
-    print(f"[cache] MISS {seq_id[:40]} -- falling back to VRS")
-    return load_sequence(sequence_root, window=window, stride=stride, augment=augment)
+    return make_windows(imu1_reg, imu2_reg, pos_at_imu, quat_at_imu, window, stride, augment=augment)
