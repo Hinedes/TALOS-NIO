@@ -25,8 +25,9 @@ def find_latest_checkpoint(golden_dir: Path) -> Path:
     return ckpt_path
 
 
-# Setup paths
-golden_dir = Path('/home/TALOS/golden')
+# Setup paths (use current user's home directory)
+golden_dir = Path.home() / 'TALOS' / 'golden'
+print(f"[Paths] Using golden_dir: {golden_dir}")
 ckpt_path = find_latest_checkpoint(golden_dir)
 
 # Load model and checkpoint
@@ -37,7 +38,7 @@ model.load_state_dict(ckpt, strict=False)
 print(f"[Device] {device}")
 
 # Load validation data
-val_path = Path('/home/TALOS/nymeria').glob('Nymeria_v0.0_*shelby_arroyo*recording_head')
+val_path = (Path.home() / 'TALOS' / 'nymeria').glob('Nymeria_v0.0_*shelby_arroyo*recording_head')
 val_path = next(val_path, None)
 if val_path is None:
     raise FileNotFoundError("Could not find Shelby Arroyo validation sequence")

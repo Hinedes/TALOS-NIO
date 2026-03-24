@@ -113,16 +113,28 @@ def run_eval(golden_dir: str, val_seq_path: str, max_seconds: int = 300, output_
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Evaluate latest TALOS checkpoint")
-    parser.add_argument('--golden', default='/home/TALOS/golden', 
-                        help='Path to golden directory containing run_* folders')
-    parser.add_argument('--val-seq', required=True,
-                        help='Path to validation sequence (e.g., /path/to/Nymeria_v0.0_*/recording_head)')
+    parser.add_argument('--golden', default=None, 
+                        help='Path to golden directory containing run_* folders (default: ~/TALOS/golden)')
+    parser.add_argument('--val-seq', default=None,
+                        help='Path to validation sequence (default: auto-search Shelby Arroyo)')
     parser.add_argument('--max-seconds', type=int, default=300,
                         help='Maximum seconds of validation sequence to evaluate')
     parser.add_argument('--output-dir', default=None,
                         help='Output directory for plots (default: ./eval_output)')
     
     args = parser.parse_args()
+    
+    # Auto-detect golden directory
+    if args.golden is None:
+        args.golden = Path.home() / 'TALOS' / 'golden'
+    
+    # Auto-find Shelby Arroyo validation sequence
+    if args.val_seq is None:
+        nymeria_path = Path.home() / 'TALOS' / 'nymeria'
+        val_seqs = list(nymeria_path.glob('Nymeria_v0.0_*shelby_arroyo*recording_head'))
+        if not val_seqs:
+            raise FileNotFoundError(f"No Shelby Arroyo sequences found in {nymeria_path}")
+        args.val_seq = sorted(val_seqs)[0] / 'recording_head'
     
     ate, rte = run_eval(
         golden_dir=args.golden,
