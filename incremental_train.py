@@ -22,6 +22,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import numba
 import numpy as np
 import pandas as pd
 import torch
@@ -103,6 +104,59 @@ LAID_WINDOWED_BG_CLAMP   = 1e-3
 LAID_WINDOWED_MIN_OMEGA  = 0.05
 
 # ESKF Physics Engine
+# Numba-compiled math (Stateless, pure C-speed)
+@numba.njit(cache=True, fastmath=True)
+def _eskf_skew(v):
+    return np.array([[ 0.0,  -v[2],  v[1]],
+                     [ v[2],   0.0, -v[0]],
+                     [-v[1],  v[0],  0.0 ]])
+
+@numba.njit(cache=True, fastmath=True)
+def _rotvec_to_matrix(rotvec):
+    angle = np.linalg.norm(rotvec)
+    if angle < 1e-9:
+        return np.eye(3)
+    K = _eskf_skew(rotvec / angle)
+    return np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
+
+@numba.njit(cache=True, fastmath=True)
+def _eskf_predict_math(dt, position, velocity, orientation, bg, ba, b_vy, P, Q, accel, gyro, gravity,
+                       q_straight, q_sweep, omega_gate, beta):
+    u_a = accel - ba
+    u_g = gyro - bg
+    omega_z = float(u_g[2])
+    v_horiz_sq = velocity[0]**2 + velocity[1]**2
+    
+    if v_horiz_sq < 0.1:
+        q_bvy = q_straight
+    else:
+        q_bvy = q_straight if abs(omega_z) < omega_gate else q_sweep
+        
+    Q[15, 15] = q_bvy * dt
+    aw = orientation @ u_a + gravity
+    
+    pos_new = position + velocity * dt + 0.5 * aw * dt**2
+    vel_new = velocity + aw * dt
+    b_vy_new = b_vy * np.exp(-beta * dt)
+    
+    ori_new = orientation @ _rotvec_to_matrix(u_g * dt)
+    
+    F = np.eye(16)
+    F[0:3, 3:6]   = np.eye(3) * dt
+    F[3:6, 6:9]   = -orientation @ _eskf_skew(u_a) * dt
+    F[3:6, 12:15] = -orientation * dt
+    F[6:9, 9:12]  = -orientation * dt
+    F[15, 15]     = 1.0 - beta * dt
+    
+    P_new = F @ P @ F.T + Q
+    
+    # SVD orthogonalization 
+    U, _, Vt = np.linalg.svd(ori_new)
+    ori_new = U @ Vt
+    
+    return pos_new, vel_new, ori_new, b_vy_new, P_new, Q
+
+
 class ESKF:
     def __init__(self, dt=0.01, gravity=None):
         self.dt      = dt
@@ -134,33 +188,20 @@ class ESKF:
 
     def predict(self, accel, gyro):
         self.gyro_meas = np.asarray(gyro, dtype=np.float64)
-        dt, R = self.dt, self.orientation
-        u_a = accel - self.ba
-        u_g = gyro  - self.bg
-        omega_z = float(u_g[2])
-        v_horiz_sq = self.velocity[0]**2 + self.velocity[1]**2
-        if v_horiz_sq < 0.1:
-            q_bvy_density = self._b_vy_q_straight
-        else:
-            q_bvy_density = self._b_vy_q_straight if abs(omega_z) < self._b_vy_omega_gate else self._b_vy_q_sweep
-        self.Q[15, 15] = q_bvy_density * dt
-        aw  = R @ u_a + self.gravity
-        self.position += self.velocity * dt + 0.5 * aw * dt**2
-        self.velocity += aw * dt
-        self.b_vy *= np.exp(-self._b_vy_beta * dt)
-        ang = np.linalg.norm(u_g) * dt
-        if ang > 1e-9:
-            self.orientation = R @ Rotation.from_rotvec(u_g * dt).as_matrix()
-        F = np.eye(self.state_dim)
-        F[0:3, 3:6]   = np.eye(3) * dt
-        F[3:6, 6:9]   = -R @ self._skew(u_a) * dt
-        F[3:6, 12:15] = -R * dt
-        F[6:9, 9:12]  = -R * dt
-        F[15, 15] = 1.0 - self._b_vy_beta * dt
-        self.P = F @ self.P @ F.T + self.Q
-        # SO(3) orthogonalization: prevent floating-point drift from corrupting rotation matrix
-        U, _, Vt = np.linalg.svd(self.orientation)
-        self.orientation = U @ Vt
+        
+        pos, vel, ori, b_vy, P, Q = _eskf_predict_math(
+            self.dt, self.position, self.velocity, self.orientation, 
+            self.bg, self.ba, self.b_vy, self.P, self.Q, accel, gyro, self.gravity,
+            self._b_vy_q_straight, self._b_vy_q_sweep, self._b_vy_omega_gate, self._b_vy_beta
+        )
+        
+        self.position = pos
+        self.velocity = vel
+        self.orientation = ori
+        self.b_vy = b_vy
+        self.P = P
+        self.Q = Q
+
 
     def update_velocity(self, vel, R_obs, slap_threshold=5.0):
         """ESKF velocity update with Mahalanobis Slap Gate (threshold=5.0)."""
