@@ -548,29 +548,21 @@ class ESKF:
 def compute_loss(pt, pcov, gt):
     gt_speed = gt.norm(dim=-1).unsqueeze(-1)
 
-    # 1. Translation Head (Unchanged)
-    loss_mse = F.mse_loss(pt, gt, reduction='none')
-    stationary_mask = (gt_speed > 0.05).float() 
-    loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-6)).unsqueeze(-1)
-    loss_velocity = torch.mean(loss_mse) + 0.5 * torch.mean(loss_dir * stationary_mask)
-
-    # 2. Covariance Head: THE CLAMP INTERVENTION
-    # We restrict pcov. A max of 4.0 equals a variance of ~54 m^2/s^2, 
-    # which is a massive but strictly finite upper bound.
-    # A min of -15.0 prevents numerical underflow.
+    # 1. Properly coupled Gaussian NLL -- gradients flow into BOTH heads
     pcov_clamped = torch.clamp(pcov, min=-15.0, max=4.0)
-    
     var = torch.exp(pcov_clamped) + 1e-6
-    mse_detached = (pt.detach() - gt) ** 2
-    
-    beta = 0.2  
-    loss_nll = 0.5 * (beta * pcov_clamped + mse_detached / var)
-    
-    # 3. Dynamic Weighting (Unchanged)
-    weight = 1.0 + 10.0 * gt_speed
-    loss_covariance = torch.mean(weight * loss_nll)
+    mse = (pt - gt) ** 2                       # NOT detached
+    loss_nll = 0.5 * (pcov_clamped + mse / var) # standard Gaussian NLL
 
-    return loss_velocity + loss_covariance
+    # 2. Direction loss during motion
+    stationary_mask = (gt_speed > 0.05).float()
+    loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-6)).unsqueeze(-1)
+
+    # 3. Speed-weighted combination
+    weight = 1.0 + 10.0 * gt_speed
+    loss = torch.mean(weight * loss_nll) + 0.5 * torch.mean(loss_dir * stationary_mask)
+
+    return loss
 
 
 # Data Pipeline
