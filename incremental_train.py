@@ -59,7 +59,7 @@ PATIENCE               = 30      # ESKF ATE strikes before halting (physical ove
 LOSS_PATIENCE          = 10     # Loss stagnation strikes before halting (dead model)
 LOSS_MIN_DELTA         = 1e-5   # Minimum loss improvement to count as progress
 WARMUP_LOSS_THRESHOLD  = 1.0    # Don't run ESKF eval until loss drops below this
-STORAGE_FLOOR_GB       = 50.0
+STORAGE_FLOOR_GB       = 100.0  # EWS Hard Limit: Protects the 900GB M2 SSD from overflowing
 EPOCHS_PER_ROUND       = 50
 BATCH_SIZE             = 4096
 VAL_SUBJECT            = 'shelby_arroyo'  # 63m locomotion stress test
@@ -673,6 +673,13 @@ def load_continuous_val_stream(seq_root: Path):
     return df, true_gravity
 
 def download_sequence(seq_id: str, entry: dict, root: Path) -> Path | None:
+    # --- EWS: Aggressive Storage Bypass ---
+    # Because of the 900GB drive limit, if the compressed NPZ cache exists, NEVER download the 4GB VRS Zip!
+    cache_path = Path('/mnt/c/TALOS/golden/cache') / f"{seq_id}.npz"
+    if cache_path.exists():
+        # Virtual path - load_sequence_cached intercepts this
+        return root / seq_id / 'recording_head'
+
     target_bundle = entry.get('recording_head')
     if not target_bundle: return None
 
@@ -1524,6 +1531,15 @@ def main():
 
         try:
             new_data   = load_sequence_cached(seq_path)
+            
+            # --- EWS: Instant Garbage Collection! ---
+            # Now that it's permanently compressed into an .npz, vaporize the 4-6GB raw VRS 
+            # directories and zip files to keep the 900GB SSD pristine forever.
+            if seq_path.exists() and "recording_head" in seq_path.name:
+                shutil.rmtree(seq_path.parent, ignore_errors=True)
+                for z in root.glob(f"*{sid}*.zip"):
+                    z.unlink(missing_ok=True)
+                print(f"  [EWS Cleanup] Vaporized raw VRS & zip files for {sid[:15]} to reclaim space!")
             
             # --- Unlimited Accumulation ---
             subject_pool.append(new_data)
