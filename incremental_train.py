@@ -1458,11 +1458,19 @@ def main():
         bundle = e.get("recording_head", {})
         fn = bundle.get("filename", "")
         return 0 if (root / Path(fn).stem).exists() else 1
-    train_seqs.sort(key=_on_disk)
-    # Shuffle within each group independently
+    
+    # Apply the legendary Fisher-Yates shuffle proposed by the USER
+    def fisher_yates_shuffle(arr):
+        for i in range(len(arr) - 1, 0, -1):
+            j = random.randint(0, i)
+            arr[i], arr[j] = arr[j], arr[i]
+
     on_disk  = [x for x in train_seqs if _on_disk(x) == 0]
     off_disk = [x for x in train_seqs if _on_disk(x) == 1]
-    random.shuffle(on_disk)
+    
+    fisher_yates_shuffle(on_disk)
+    fisher_yates_shuffle(off_disk) # Crucial: shuffle the new downloads too!
+    
     train_seqs = on_disk + off_disk
     val_seqs   = [(sid, e) for sid, e in manifest.items() if VAL_SUBJECT in sid]
 
