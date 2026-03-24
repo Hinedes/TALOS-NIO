@@ -1601,8 +1601,12 @@ def main():
             update_master_dashboard(history, run_dir / 'master_telemetry.png')
 
             if cat_strikes >= CAT_STRIKE_LIMIT:
-                print(f"\n!! CATASTROPHIC DIVERGENCE LIMIT REACHED ({CAT_STRIKE_LIMIT}). Halting.")
-                break
+                print(f"\n!! CATASTROPHIC DIVERGENCE LIMIT REACHED ({CAT_STRIKE_LIMIT}).")
+                print("   [Overnight Hack] Who cares? Nuking the accumulated pool and pushing to the next sequence!")
+                subject_pool.clear()
+                train_data = None
+                cat_strikes = 0
+                continue
 
             # Do not consume a physical-overfitting strike for quarantined rounds
             continue
@@ -1651,8 +1655,24 @@ def main():
             print(f"  !! ATE degrading : Strike {bad_rounds}/{PATIENCE}")
 
         if bad_rounds >= PATIENCE:
-            print(f"\n!! PHYSICAL OVERFITTING DETECTED. ESKF drift worsened for {PATIENCE} rounds. Halting.")
-            break
+            print(f"\n!! PHYSICAL OVERFITTING DETECTED. ESKF drift worsened for {PATIENCE} rounds.")
+            print("   [Overnight Hack] Patience broken. Restoring best physical weights, nuking pool, and pushing forward.")
+            
+            bad_rounds = 0
+            subject_pool.clear()
+            train_data = None
+            
+            best_ckpt = run_dir / 'talos_best_physical.pth'
+            if best_ckpt.exists():
+                model.load_state_dict(torch.load(best_ckpt, map_location=device, weights_only=False))
+                opt.state.clear()
+                torch.save(model.state_dict(), golden / 'talos.pth')
+            
+            # Escape velocity: gently decay LR to settle into new minima space
+            for param_group in opt.param_groups:
+                param_group['lr'] = max(param_group['lr'] * 0.5, 1e-5)
+                
+            continue
 
     print(f"\n:: Training Complete ::")
     if np.isfinite(best_ate_ever) and best_ate_round > 0:
