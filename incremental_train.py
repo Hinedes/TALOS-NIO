@@ -546,35 +546,30 @@ class ESKF:
         return True, mahal_sq, abs(y), float(np.linalg.norm(self.bg - bg_before))
 
 def compute_loss(pt, pcov, gt):
-    # 1. The Translation Head: Robust, High-Weight Loss
-    pred_norm = pt.norm(dim=-1)
-    gt_norm = gt.norm(dim=-1)
+    # Extract speed for masking and covariance weighting
+    gt_speed = gt.norm(dim=-1).unsqueeze(-1)
 
-    # Direction Loss (Dominant, Scale-Invariant)
-    loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-8)).unsqueeze(-1)
+    # 1. Translation Head: Pure Cartesian Euclidean Anchor
+    # MSE is retained without artificial scaling to ensure stable convergence across all speeds.
+    loss_mse = F.mse_loss(pt, gt, reduction='none')
 
-    # Magnitude Loss (Strong Anchor, Outlier-Robust)
-    mask = gt_norm > 0.05
-    loss_mag = torch.zeros_like(gt_norm)
-    if mask.any():
-        speed_ratio = pred_norm[mask] / gt_norm[mask]
-        loss_mag[mask] = F.huber_loss(speed_ratio, torch.ones_like(speed_ratio), delta=0.15, reduction='none')
+    # Mild directional penalty, masked to prevent zero-velocity instability
+    stationary_mask = (gt_speed > 0.05).float()
+    loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-6)).unsqueeze(-1)
 
-    # 2. The Covariance Head: Beta-NLL on Detached Predictions
+    # Kinematic loss remains cleanly scaled
+    loss_velocity = torch.mean(loss_mse) + 0.5 * torch.mean(loss_dir * stationary_mask)
+
+    # 2. Covariance Head: Beta-NLL on Detached Predictions
     var = torch.exp(pcov) + 1e-6
     mse_detached = (pt.detach() - gt) ** 2
 
-    # Beta attenuation breaks the variance collapse
     beta = 0.2
     loss_nll = 0.5 * (beta * pcov + mse_detached / var)
 
-    # 3. Independent Weighting Strategy
-    weight = 1.0 + 10.0 * gt_norm.unsqueeze(-1)
+    # 3. Dynamic Weighting (Strictly isolated to Uncertainty)
+    weight = 1.0 + 10.0 * gt_speed
     loss_covariance = torch.mean(weight * loss_nll)
-
-    lambda_dir = 2.0
-    lambda_mag = 1.0
-    loss_velocity = lambda_dir * torch.mean(loss_dir) + lambda_mag * torch.mean(loss_mag)
 
     return loss_velocity + loss_covariance
 
