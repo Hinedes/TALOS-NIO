@@ -1568,21 +1568,54 @@ def main():
             print(f"  !! Load failed: {e}")
             continue
 
-        print(f"  [Train] Pool size: {train_data['trans'].shape[0]:,} windows")
-        train_final, _ = train_round(model, opt, sched, train_data, val_data, device,
-                         EPOCHS_PER_ROUND, golden / 'talos.pth',
-                         loader_workers=max(0, args.loader_workers))
+        try:
+            print(f"  [Train] Pool size: {train_data['trans'].shape[0]:,} windows")
+            train_final, _ = train_round(model, opt, sched, train_data, val_data, device,
+                             EPOCHS_PER_ROUND, golden / 'talos.pth',
+                             loader_workers=max(0, args.loader_workers))
+            
+            if np.isnan(train_final):
+                print("\n!! NaN DETECTED IN LOSS! Mathematical failure.")
+                print("   [Overnight Hack] Emptying pool, halving LR, reverting weights, and continuing!")
+                torch.cuda.empty_cache()
+                subject_pool.clear()
+                train_data = None
+                
+                best_ckpt = run_dir / 'talos_best_physical.pth'
+                if best_ckpt.exists():
+                    model.load_state_dict(torch.load(best_ckpt, map_location=device, weights_only=False))
+                    opt.state.clear()
+                
+                for param_group in opt.param_groups:
+                    param_group['lr'] = max(param_group['lr'] * 0.5, 1e-5)
+                continue
 
-        if best_loss_ever - train_final > LOSS_MIN_DELTA:
-            best_loss_ever       = train_final
-            loss_stagnant_rounds = 0
-        else:
-            loss_stagnant_rounds += 1
-            print(f"  !! Loss stagnant : Strike {loss_stagnant_rounds}/{LOSS_PATIENCE}")
+            if best_loss_ever - train_final > LOSS_MIN_DELTA:
+                best_loss_ever       = train_final
+                loss_stagnant_rounds = 0
+            else:
+                loss_stagnant_rounds += 1
+                print(f"  !! Loss stagnant : Strike {loss_stagnant_rounds}/{LOSS_PATIENCE}")
 
-        if loss_stagnant_rounds >= LOSS_PATIENCE:
-            print(f"\n!! NEURAL STAGNATION DETECTED. Loss flat for {LOSS_PATIENCE} rounds. Halting.")
-            break
+            if loss_stagnant_rounds >= LOSS_PATIENCE:
+                print(f"\n!! NEURAL STAGNATION DETECTED. Loss flat for {LOSS_PATIENCE} rounds.")
+                print("   [Overnight Hack] Ignored! Nuking pool and pushing forward.")
+                loss_stagnant_rounds = 0
+                subject_pool.clear()
+                train_data = None
+                for param_group in opt.param_groups:
+                    param_group['lr'] = max(param_group['lr'] * 0.5, 1e-5)
+                continue
+                
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                print(f"\n!! CUDA OUT OF MEMORY: {e}")
+                print("   [Overnight Hack] Pool grew too large. Purging memory and continuing!")
+                torch.cuda.empty_cache()
+                subject_pool.clear()
+                train_data = None
+                continue
+            raise
 
         if train_final > WARMUP_LOSS_THRESHOLD:
             print(f"  [ESKF]  Skipped : warming up (loss={train_final:.4f} > {WARMUP_LOSS_THRESHOLD})")
