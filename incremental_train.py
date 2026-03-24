@@ -546,28 +546,27 @@ class ESKF:
         return True, mahal_sq, abs(y), float(np.linalg.norm(self.bg - bg_before))
 
 def compute_loss(pt, pcov, gt):
-    # Extract speed for masking and covariance weighting
     gt_speed = gt.norm(dim=-1).unsqueeze(-1)
 
-    # 1. Translation Head: Pure Cartesian Euclidean Anchor
-    # MSE is retained without artificial scaling to ensure stable convergence across all speeds.
+    # 1. Translation Head (Unchanged)
     loss_mse = F.mse_loss(pt, gt, reduction='none')
-
-    # Mild directional penalty, masked to prevent zero-velocity instability
-    stationary_mask = (gt_speed > 0.05).float()
+    stationary_mask = (gt_speed > 0.05).float() 
     loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-6)).unsqueeze(-1)
-
-    # Kinematic loss remains cleanly scaled
     loss_velocity = torch.mean(loss_mse) + 0.5 * torch.mean(loss_dir * stationary_mask)
 
-    # 2. Covariance Head: Beta-NLL on Detached Predictions
-    var = torch.exp(pcov) + 1e-6
+    # 2. Covariance Head: THE CLAMP INTERVENTION
+    # We restrict pcov. A max of 4.0 equals a variance of ~54 m^2/s^2, 
+    # which is a massive but strictly finite upper bound.
+    # A min of -15.0 prevents numerical underflow.
+    pcov_clamped = torch.clamp(pcov, min=-15.0, max=4.0)
+    
+    var = torch.exp(pcov_clamped) + 1e-6
     mse_detached = (pt.detach() - gt) ** 2
-
-    beta = 0.2
-    loss_nll = 0.5 * (beta * pcov + mse_detached / var)
-
-    # 3. Dynamic Weighting (Strictly isolated to Uncertainty)
+    
+    beta = 0.2  
+    loss_nll = 0.5 * (beta * pcov_clamped + mse_detached / var)
+    
+    # 3. Dynamic Weighting (Unchanged)
     weight = 1.0 + 10.0 * gt_speed
     loss_covariance = torch.mean(weight * loss_nll)
 
