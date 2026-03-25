@@ -165,24 +165,33 @@ def evaluate_trajectory(params, run_dir, val_df, val_gravity, npz_path):
 def optimize_run(run_dir_str, n_trials=500):
     run_dir = Path(run_dir_str)
     
-    # Wait for a predictions file to appear from the GPU
-    print(f"Waiting for neural inferences in {run_dir}...")
-    npz_files = []
-    while not npz_files:
-        npz_files = list(run_dir.glob("val_predictions_R*.npz"))
-        time.sleep(10)
-    
-    # Sort by round number and pick the latest
-    npz_path = sorted(npz_files, key=lambda x: int(x.stem.split('_R')[1]))[-1]
-    print(f"Found {npz_path.name}. Starting Massively Parallel ESKF Optuna Search.")
-
     # We need the val_df. The easiest way without PyTorch is using the cache.
     import pickle
-    cache_path = glob.glob("/mnt/c/TALOS/golden/cache/*_val_stream.pkl")[0]
+    cache_path = glob.glob("/home/iclab/TALOS/golden/cache/*_val_stream.pkl")[0]
     val_df, val_gravity = pickle.load(open(cache_path, "rb"))
     val_df_walk = val_df.iloc[313*100:313*100+30000].reset_index(drop=True) # 300 seconds
 
-    def objective(trial):
+    last_processed_npz = None
+
+    print(f"Daemon watching for neural inferences in {run_dir}...")
+    
+    while True:
+        npz_files = list(run_dir.glob("val_predictions_R*.npz"))
+        if not npz_files:
+            time.sleep(10)
+            continue
+            
+        # Sort by round number and pick the latest
+        npz_path = sorted(npz_files, key=lambda x: int(x.stem.split('_R')[1]))[-1]
+        
+        if npz_path == last_processed_npz:
+            time.sleep(10)
+            continue
+            
+        print(f"\n[Daemon] Found NEW target: {npz_path.name}. Starting Massively Parallel ESKF Optuna Search.")
+        last_processed_npz = npz_path
+
+        def objective(trial):
         params = {
             'SLAP_THRESHOLD': trial.suggest_float("SLAP_THRESHOLD", 1.5, 8.0),
             'R_OBS_FIXED_DIAG': trial.suggest_float("R_OBS_FIXED_DIAG", 0.01, 1.0, log=True),
@@ -217,7 +226,7 @@ def optimize_run(run_dir_str, n_trials=500):
     config_path = run_dir / 'darwin_config.json'
     config_path.write_text(json.dumps(best_params, indent=2))
     print(f"Saved to {config_path.name}. GPU incremental_train.py will use this automatically on next round.")
-
+        print(f"[Daemon] Optimization cycle complete. Resuming watch...")
 if __name__ == "__main__":
     # Point this at the latest run directory
     runs = sorted(glob.glob("/home/iclab/TALOS/golden/run_*"))
