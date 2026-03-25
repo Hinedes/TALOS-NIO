@@ -551,22 +551,15 @@ class ESKF:
         return True, mahal_sq, abs(y), float(np.linalg.norm(self.bg - bg_before))
 
 def compute_loss(pt, pcov, gt):
-    gt_speed = gt.norm(dim=-1).unsqueeze(-1)
-
-    # 1. Properly coupled Gaussian NLL -- gradients flow into BOTH heads
-    pcov_clamped = torch.clamp(pcov, min=-15.0, max=4.0)
-    var = torch.exp(pcov_clamped) + 1e-6
-    mse = (pt - gt) ** 2                       # NOT detached
-    loss_nll = 0.5 * (pcov_clamped + mse / var) # standard Gaussian NLL
-
-    # 2. Direction loss during motion
-    stationary_mask = (gt_speed > 0.05).float()
-    loss_dir = (1.0 - F.cosine_similarity(pt, gt, dim=-1, eps=1e-6)).unsqueeze(-1)
-
-    # 3. Speed-weighted combination
+    # Pure speed-weighted MSE: the most stable mathematical foundation
+    gt_speed = gt.norm(dim=-1, keepdim=True)
     weight = 1.0 + 10.0 * gt_speed
-    loss = torch.mean(weight * loss_nll) + 0.5 * torch.mean(loss_dir * stationary_mask)
-
+    
+    # We ignore pcov completely in the loss landscape to ensure the 
+    # translation trunk learns a pure, uncorrupted velocity representation.
+    mse = F.mse_loss(pt, gt, reduction='none')
+    loss = torch.mean(weight * mse)
+    
     return loss
 
 
