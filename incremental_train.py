@@ -1687,6 +1687,21 @@ def main():
         print("  [ESKF]  Integrating validation sequence...")
         # Skip stationary period (first 313s), evaluate on real walking only
         val_df_walk = val_df.iloc[313*100:].reset_index(drop=True)
+        
+        # --- PHASE 3: Optuna Daemon Synchronization ---
+        # Automatically hot-reload the latest brute-forced physical parameters
+        daemon_config = run_dir / 'darwin_config.json'
+        if daemon_config.exists():
+            import json
+            try:
+                with open(daemon_config, 'r') as f:
+                    new_params = json.load(f)
+                    if new_params != fusion_params:
+                        fusion_params = new_params
+                        print(f"  [Daemon Sync] Hot-reloading optimized ESKF params: {fusion_params}")
+            except Exception as e:
+                pass
+        
         mean_ate = evaluate_eskf(model, val_df_walk, val_gravity, device, round_idx, run_dir,
                                  max_seconds=300, fusion_params=fusion_params)
         print(f"  [Result] Neural Loss: {train_final:.4f} | ESKF ATE: {mean_ate:.3f}m")
