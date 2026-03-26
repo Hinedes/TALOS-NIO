@@ -171,7 +171,13 @@ class DarwinEngine:
             The winning parameter dict.
         """
         self.generation += 1
-        parent = parent_params if parent_params else self._get_defaults()
+        
+        # Ensure parent has *all* genes, even if it came from Optuna which only tunes 3
+        parent = self._get_defaults()
+        if parent_params:
+            for k, v in parent_params.items():
+                if k in parent:
+                    parent[k] = v
 
         # Step 1: Diagnose
         diagnosis = self.diagnose(summary_history)
