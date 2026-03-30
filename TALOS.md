@@ -1,207 +1,220 @@
-# TALOS NIO
+> [!NOTE]
+> ## Changelog / Reality Check — March 17, 2026
+> 1. **Overlord output semantics:** `SpectralMLP` predicts **mean local velocity (m/s)** plus a **log-variance head** (`head_cov`). Quaternion head is not present in the model.
+> 2. **Scheduler update:** Training uses `ReduceLROnPlateau` (validation loss driven), not `OneCycleLR`.
+> 3. **ZARU quarantine:** `update_zaru()` uses Joseph-form covariance update and only updates gyro bias states (9:12).
+> 4. **Runtime guardrails:** `bulwark.py` hard-zeros implausible local velocity predictions before ESKF injection.
 
-Code-synced state: March 26, 2026.
+# TALOS NIO — Neural-Inertial Odometry Pipeline
+### Code-Synced State (Current Repository)
+**Ground Truth State: March 17, 2026**
 
-This document reflects the current repository behavior, not aspirational design.
+---
 
 ## 1. Mission
 
-TALOS is an offline training and evaluation stack for Nymeria dual-IMU sequences. The main pipeline combines:
+TALOS NIO bounds inertial drift using a hybrid pipeline:
+- Fast 100Hz ESKF propagation on IMU1.
+- Slower learned velocity corrections from a spectral MLP.
+- Physics/biomechanics guardrails (LAID checks, ZARU/CAU stillness updates, cage clamp).
 
-- 100 Hz ESKF propagation on the primary IMU
-- learned local-velocity corrections from a spectral MLP
-- physics and biomechanics guardrails for drift bounding
+This repository is currently an offline training + evaluation stack around Nymeria data.
 
-The current repository is centered on incremental training, physical evaluation, telemetry, and parameter recovery.
+---
 
-## 2. Current Architecture
+## 2. Implemented Architecture
 
-### Fast loop: ESKF in `incremental_train.py`
+### Fast Loop (ESKF)
+Implemented in `incremental_train.py` (`ESKF` class):
+- 15-state error-state filter:
+  - position `[0:3]`
+  - velocity `[3:6]`
+  - orientation error `[6:9]`
+  - gyro bias `[9:12]`
+  - accel bias `[12:15]`
+- Predict step uses SO(3) integration and SVD re-orthogonalization.
+- `update_velocity()` includes Mahalanobis innovation gating (“Slap Gate”, default threshold 5.0).
+- Overlord quarantine in velocity update zeroes Kalman gain rows `[6:15]` (orientation + biases untouched by neural correction).
 
-The filter is a 15-state error-state system:
+### Neural Loop (Overlord / SpectralMLP)
+Implemented in `SMLP.py`:
+- Input: raw IMU window `(B, 6, 64)`
+- Internal FFT path:
+  - `rfft` over time axis
+  - `log1p(abs(.))`
+  - flatten to 198 features
+- MLP backbone:
+  - Dropout(0.4)
+  - 198→256→128→64 with BatchNorm + ReLU
+- Heads:
+  - `head_trans` (3) = mean local velocity (m/s)
+  - `head_cov` (3) = log-variance per axis
 
-- position `[0:3]`
-- velocity `[3:6]`
-- orientation error `[6:9]`
-- gyro bias `[9:12]`
-- accel bias `[12:15]`
+### Bounded Fusion
+In `evaluate_eskf()` (`incremental_train.py`):
+- Neural update runs every 10 samples once window is full.
+- Predicted local velocity is passed through `bulwark()` before use.
+- Local velocity is rotated to world frame and fused via ESKF velocity update.
+- Dynamic covariance shaping uses predicted log-variance for diagnostics; current fusion noise uses static `R_obs = 0.1 * I`.
 
-Propagation integrates accel and gyro, then re-orthogonalizes orientation with SVD.
+---
 
-Current update paths:
+## 3. Guardrails and Physical Constraints
 
-- `update_velocity()` performs world-velocity fusion with a dual Mahalanobis Slap Gate.
-- `update_local_velocity()` is the main neural fusion path used in evaluation.
-- `update_zaru()` is a gyro-bias-only stillness update with Joseph-form covariance handling.
-- `update_cau()` uses gravity to correct orientation and accel bias during stillness.
+### Slap Gate
+`ESKF.update_velocity()`:
+- Computes Mahalanobis distance on velocity innovation.
+- Rejects update if above threshold (`5.0^2`).
+- Reuses `S_inv` for Kalman gain.
 
-`update_local_velocity()` does the following:
+### Bulwark Hard Limits
+`bulwark.py`:
+- If any local velocity axis exceeds:
+  - X: `0.40 m/s`
+  - Y: `1.60 m/s`
+  - Z: `0.35 m/s`
+  then prediction is zeroed.
 
-- rotates world velocity into the body frame to compare against the neural prediction
-- gates on both state-aware and measurement-only Mahalanobis distance
-- quarantines accel bias from the Kalman gain
-- projects the orientation correction onto yaw only
-- applies gyro-bias correction through cross-covariance
+### ZARU (Zero Angular Rate Update)
+`ESKF.update_zaru()` with detection in `evaluate_eskf()`:
+- Trigger window: `ZARU_WINDOW = 50` (~0.5s at 100Hz)
+- Stillness requirements:
+  - gyro variance sum `< 1e-4`
+  - accel variance sum `< 5e-3` (dual-lock against false positives)
+- Measurement targets gyro bias only (`H[:, 9:12] = -I`)
+- Joseph-form covariance update to preserve PSD/symmetry.
+- Companion zero-velocity update is applied during detected standstill.
 
-### Neural loop: `SMLP.py`
+### CAU (Continuous Attitude Update)
+`ESKF.update_cau()`:
+- Enabled only under same stillness condition as ZARU.
+- Uses accelerometer gravity observation to correct orientation + accel bias.
+- Quarantines position/velocity/gyro-bias from CAU correction.
 
-`BigSpectralMLP` is an alias of `SpectralMLP`.
+### LAID
+`laid.py` currently provides:
+- Differential-acceleration consistency check (`LAIDBouncer.check`) using lever-arm physics.
+- Per-sample check API (`check_sample`) and batch utilities.
+- Yaw anchor helper exists, but in current evaluation path this yaw-anchor injection is explicitly disabled (commented as mathematically flawed in rotating frames).
 
-- Input shape: `(B, 6, 64)`
-- FFT path: CPU-side `rfft` over time, then signed `log1p(abs(.))` on real and imaginary parts
-- Spectral feature size: 396
-- Model layout: separate translation and covariance trunks
-- Outputs: mean local velocity `(3,)` and log-variance `(3,)`
+### NPP + Cage
+- `npp.py`: dynamic NPP estimation + EMA/Z lock.
+- `halo.py`: orientation clamp observer implementation exists.
+- In current `evaluate_eskf()` path:
+  - NPP tracking is active.
+  - HALO orientation cage is instantiated but orientation clamping is disabled.
+  - Positional cage clamp is active at radius `0.50 m` around tracked cage center.
 
-There is no quaternion prediction head in the current model.
+---
 
-In `incremental_train.py`, the FFT stays eager while `model.npu_core` is compiled.
+## 4. Data and Labels
 
-### Fusion and guardrails
+### Dataset
+Nymeria (Aria) via `nymeria_loader.py`:
+- `imu-right` (`1202-1`) treated as IMU1 (primary)
+- `imu-left` (`1202-2`) treated as IMU2 (reference for differential methods)
+- Streams are extrinsic-corrected to device frame and resampled to 100Hz.
 
-In evaluation, neural updates happen every 10 samples once the 64-sample window is full.
+### Windowing / Supervision
+- Window size: `64`
+- Stride: `10`
+- Labels:
+  - `trans`: **mean local velocity** over window (not displacement)
+  - `quat`: relative rotation delta in `[W, X, Y, Z]`
+- Loader returns both `imu1_features` and `imu2_features`.
 
-- The predicted local velocity is multiplied by `PRED_VEL_GAIN`
-- `bulwark()` clips implausible local velocity per axis; it does not zero the vector
-- LAID checks compare IMU1 and IMU2 differential acceleration over a window
-- If LAID vetoes a window, the neural update is skipped
-- `USE_DYNAMIC_R_OBS` exists, but the default path uses a fixed observation covariance
-- Hard safety checks reject updates that exceed configured world-speed or innovation limits
-
-Guardrail status in the current evaluation path:
-
-- NPP tracking is active
-- HALO is instantiated, but orientation clamping is disabled
-- Positional cage clamping is active at a radius of `0.30 m` around the tracked cage center
-- LAID yaw anchor is present, but disabled by default
-- LAID differential update and windowed LAID update are present, but disabled by default
-
-## 3. Data and Labels
-
-`nymeria_loader.py` handles the Nymeria Aria recordings.
-
-- `imu-right` is the primary stream used as IMU1
-- `imu-left` is the secondary stream used as IMU2 for differential checks
-- Both streams are extrinsic-corrected to device frame and resampled to 100 Hz
-
-Windowing and supervision:
-
-- window size: `64`
-- stride: `10`
-- `trans` label: mean local velocity over the window, not displacement
-- `quat` label: relative rotation delta in `[W, X, Y, Z]`
-
-The loader returns both `imu1_features` and `imu2_features`.
-
-Augmentation applies:
-
+### Augmentation
+Training loader applies:
 - temporal roll shift
-- accel and gyro noise
-- per-window accel and gyro bias injection
-- preserved gravity and DC content
+- accel/gyro noise + per-window bias injection
+- gravity/DC component preserved (not mean-subtracted)
 
-Current training uses the translation target only. `quat` is carried through the dataset, but it is not used by the present loss.
+---
 
-## 4. Training Pipeline
+## 5. Training Pipeline (incremental_train.py)
 
-The incremental loop in `incremental_train.py` does the following per sequence:
+### Round Procedure
+Per sequence:
+1. Acquire/locate sequence.
+2. Load cached or raw Nymeria windows.
+3. Accumulate into growing subject pool.
+4. Train model (`train_round`).
+5. If warmup passed, evaluate physical ATE on held-out Shelby stream.
+6. Apply dual early stopping criteria.
 
-1. Acquire or locate the sequence
-2. Load cached or raw Nymeria windows
-3. Accumulate windows into a rolling subject pool
-4. Train the model with `train_round()`
-5. After warmup, run physical ESKF evaluation on the held-out Shelby stream
-6. Apply the early-stop rules for physical overfit and neural stagnation
+### Core Training Settings
+- Optimizer: `AdamW(lr=1e-3, weight_decay=1e-2)`
+- Scheduler: `ReduceLROnPlateau(mode='min', factor=0.5, patience=3, min_lr=1e-5)`
+- Batch size: `4096`
+- Epochs per round: `50`
+- Warmup threshold for physical eval: `WARMUP_LOSS_THRESHOLD = 1.0`
 
-Training settings:
+### Loss
+Gaussian NLL with velocity-magnitude weighting:
+- model predicts mean + log-variance
+- NLL weighted by `1 + 10 * ||gt_velocity||`
 
-- optimizer: `AdamW(lr=1e-3, weight_decay=1e-2)`
-- scheduler: `ReduceLROnPlateau(mode="min", factor=0.5, patience=3, min_lr=1e-5)`
-- batch size: `4096`
-- epochs per round: `50`
-- warmup threshold for physical evaluation: `WARMUP_LOSS_THRESHOLD = 1.0`
+### Early Stopping
+- Physical overfitting: ATE degradation strikes (`PATIENCE = 15`)
+- Neural stagnation: insufficient loss improvement (`LOSS_PATIENCE = 10`, `LOSS_MIN_DELTA = 1e-5`)
 
-Loss:
-
-- Gaussian NLL over velocity with a log-variance head
-- motion-direction cosine penalty during motion
-- loss weighting increases with ground-truth speed
-
-`MegaBuffer` stores the rolling dataset in CPU memory so the subject pool can grow without repeated concatenation.
-
-## 5. Recovery and Parameter Search
-
-`darwin.py` provides a mutation-based recovery path when evaluation stagnates.
-
-It mutates the fusion parameters passed into `evaluate_eskf()`, including:
-
-- `SLAP_THRESHOLD`
-- `R_OBS_FIXED_DIAG`
-- `PRED_VEL_GAIN`
-- `CAGE_RADIUS`
-- `MAX_PRED_WORLD_SPEED_MPS`
-- `MAX_INNOVATION_NORM_MPS`
-- `USE_DYNAMIC_R_OBS`
-
-The current code writes the winning configuration and a generation log to disk.
+---
 
 ## 6. Outputs and Telemetry
 
-Evaluation and training generate:
+Generated artifacts include:
+- model checkpoints (`talos.pth`, best physical checkpoint)
+- ESKF trajectory plots per round
+- master telemetry dashboard (ATE + train loss)
+- diagnostic dashboard (`telemetry.py`) with:
+  - scale collapse lens
+  - slap gate timeline
+  - covariance shadowing lens
 
-- run-level telemetry CSV files
-- per-round ESKF plots
-- diagnostic dashboards for scale collapse, Slap Gate tension, and covariance shadowing
-- master training charts comparing ATE and loss across rounds
+---
 
-`reporting.py` can publish the final status to ntfy and optionally Notion.
+## 7. Repository Structure (Current)
 
-## 7. Repository Map
+```
+TALOS/
+├── bulwark.py
+├── cache_builder.py
+├── halo.py
+├── incremental_train.py
+├── laid.py
+├── notion_logger.py
+├── npp.py
+├── nymeria_loader.py
+├── plot_shelby.py
+├── README.md
+├── scan_dataset.py
+├── SMLP.py
+├── TALOS.md
+├── telemetry.py
+├── archive/
+│   ├── eval_rte.py
+│   ├── laid_aria_calibrated.py
+│   ├── laid.py
+│   └── test_zaru.py
+└── __pycache__/
+```
 
-Key top-level files in the current repository:
-
-- `incremental_train.py` - main incremental training and physical evaluation loop
-- `SMLP.py` - spectral neural model
-- `nymeria_loader.py` - Nymeria loading, alignment, and windowing
-- `bulwark.py` - per-axis prediction clamp
-- `laid.py` - lever-arm differential consistency checks
-- `npp.py` - neck pivot point tracker
-- `halo.py` - orientation cage observer, currently disabled in evaluation
-- `telemetry.py` - CSV append and diagnostic plotting helpers
-- `reporting.py` - ntfy and Notion publishing helpers
-- `darwin.py` - stagnation recovery and parameter search
-- `cache_builder.py` - cache generation utility
-- `scan_dataset.py` - dataset inspection utility
-- `plot.py`, `plot_shelby.py` - plotting utilities
-- `eval_best.py`, `cpu_optuna_eskf.py` - evaluation and search helpers
-- `retroactive_vrs_cleanup.py` - storage cleanup utility
-- `talos_controller.py`, `agent.py` - controller and agent layer
-- `train.py` - alternate training entry point
-- `archive/` - historical experiments and older variants
+---
 
 ## 8. Current Status Summary
 
-Active in the main pipeline:
+Implemented and active in the main pipeline:
+- Spectral MLP velocity prediction + uncertainty head
+- ESKF propagation + Slap Gate
+- ZARU + CAU stillness corrections
+- LAID differential veto check
+- NPP-driven positional cage clamp
+- Incremental Nymeria training with physical validation loop
 
-- ESKF propagation and Slap Gate fusion
-- spectral local-velocity prediction
-- LAID window veto
-- ZARU and CAU stillness updates
-- NPP tracking and positional cage clamp
-- incremental Nymeria training with physical validation
+Implemented but not fully active in current eval path:
+- HALO orientation clamping (module exists; disabled in evaluator)
+- LAID yaw-anchor correction path (helper exists; disabled in evaluator)
 
-Present but disabled by default in the current evaluation path:
+---
 
-- HALO orientation clamping
-- LAID yaw anchor
-- LAID differential update
-- LAID windowed update
-- dynamic observation covariance
-
-Not present in the current code:
-
-- quaternion prediction head
-- OneCycleLR training schedule
-- hard-zero bulwark behavior
-
-*TALOS NIO is a drift-bounding inertial stack under active iteration. This document tracks the code as it exists now.*
+*TALOS NIO is an inertial drift-bounding stack under active iteration. This document intentionally reflects code behavior, not aspirational design.*
