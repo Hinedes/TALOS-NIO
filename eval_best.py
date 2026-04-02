@@ -61,9 +61,9 @@ def run_eval(golden_dir: str, val_seq_path: str, max_seconds: int = 300, output_
     # Load validation data
     print(f"[Data] Loading validation sequence: {val_seq_path}")
     
-    # Check for cached val_stream (prioritize /mnt/c/TALOS location)
+    # Check for cached val_stream (prioritize the WSL2 cache location)
     _cache_locations = [
-        Path('/mnt/c/TALOS/golden/cache') / f"{val_seq_path.parent.name}_val_stream.pkl",
+        Path('/home/iclab/TALOS/golden/cache') / f"{val_seq_path.parent.name}_val_stream.pkl",
         golden_dir / "cache" / f"{val_seq_path.parent.name}_val_stream.pkl"
     ]
     

@@ -9,7 +9,7 @@ import shutil
 def main():
     # Paths based on TALOS standard config
     root = Path('/mnt/c/TALOS/nymeria')
-    cache_dir = Path('/mnt/c/TALOS/golden/cache')
+    cache_dir = Path('/home/iclab/TALOS/golden/cache')
     
     print(f"Scanning {root} for obsolete VRS data...")
     print(f"Cache reference: {cache_dir}\n")

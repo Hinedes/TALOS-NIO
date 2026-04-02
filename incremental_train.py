@@ -713,7 +713,7 @@ def download_sequence(seq_id: str, entry: dict, root: Path) -> Path | None:
 
     # --- EWS: Aggressive Storage Bypass ---
     # Because of the 900GB drive limit, if the compressed NPZ cache exists, NEVER download the 4GB VRS Zip!
-    cache_path = Path('/mnt/c/TALOS/golden/cache') / f"{zip_stem}.npz"
+    cache_path = Path('/home/iclab/TALOS/golden/cache') / f"{zip_stem}.npz"
     if cache_path.exists():
         # Virtual path - load_sequence_cached intercepts this
         return root / zip_stem / 'recording_head'
@@ -1556,7 +1556,7 @@ def main():
         return
 
     import pickle
-    _val_cache = Path("/mnt/c/TALOS/golden/cache") / f"{val_seq_path.parent.name}_val_stream.pkl"
+    _val_cache = Path("/home/iclab/TALOS/golden/cache") / f"{val_seq_path.parent.name}_val_stream.pkl"
     if _val_cache.exists():
         print(f"  [cache] HIT val_stream")
         val_df, val_gravity = pickle.load(open(_val_cache, "rb"))

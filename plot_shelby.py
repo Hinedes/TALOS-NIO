@@ -62,7 +62,7 @@ df, gravity = None, None
 
 if val_path:
     _cache_locations = [
-        Path('/mnt/c/TALOS/golden/cache') / f'{val_path.parent.name}_val_stream.pkl',
+        Path('/home/iclab/TALOS/golden/cache') / f'{val_path.parent.name}_val_stream.pkl',
         cache_dir / f'{val_path.parent.name}_val_stream.pkl'
     ]
     for cache_path in _cache_locations:
@@ -75,8 +75,8 @@ if df is None:
     # Look for any Shelby Arroyo .pkl in the cache
     pkl_candidates = list(cache_dir.glob("*shelby_arroyo*val_stream.pkl"))
     if not pkl_candidates:
-        # Also check common mount point
-        pkl_candidates = list(Path('/mnt/c/TALOS/golden/cache').glob("*shelby_arroyo*val_stream.pkl"))
+        # Also check the canonical WSL2 cache location
+        pkl_candidates = list(Path('/home/iclab/TALOS/golden/cache').glob("*shelby_arroyo*val_stream.pkl"))
     
     if pkl_candidates:
         _cache = sorted(pkl_candidates)[0]

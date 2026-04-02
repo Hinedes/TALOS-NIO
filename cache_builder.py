@@ -13,7 +13,7 @@ from nymeria_loader import (
 )
 
 ROOT      = Path('/mnt/c/TALOS/nymeria')
-CACHE_DIR = Path('/mnt/c/TALOS/golden/cache')
+CACHE_DIR = Path('/home/iclab/TALOS/golden/cache')
 MANIFEST  = Path('/mnt/c/TALOS/Nymeria_download_urls.json')
 
 CACHE_DIR.mkdir(parents=True, exist_ok=True)

@@ -229,7 +229,7 @@ if __name__ == '__main__':
 # ---------------------------------------------------------------------------
 # Cached loader -- bypasses VRS entirely if golden/cache/<seq_id>.npz exists
 # ---------------------------------------------------------------------------
-CACHE_DIR = Path('/mnt/c/TALOS/golden/cache')
+CACHE_DIR = Path('/home/iclab/TALOS/golden/cache')
 
 def load_sequence_cached(sequence_root: str | Path, window: int = WINDOW_SIZE,
                          stride: int = STRIDE, augment: bool = True) -> dict:
