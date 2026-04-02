@@ -18,6 +18,7 @@ import argparse
 from collections import deque
 import json
 import os
+import copy
 import shutil
 import subprocess
 from pathlib import Path
@@ -1056,17 +1057,11 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                     R_obs_used = np.diag(r_obs_diag.astype(np.float64))
                 else:
                     R_obs_used = np.eye(3) * fp_r_obs_fixed_diag
-                    r_obs_diag = np.array([fp_r_obs_fixed_diag] * 3, dtype=np.float64)
 
                 neural_updates += 1
 
-                accepted, mahal_sq = eskf_talos.update_local_velocity(
-                    pred_vel_local,
-                    R_obs=R_obs_used,
-                    slap_threshold=fp_slap_threshold,
-                )
-
-                # Telemetry only -- not fed to filter
+                # --- NEW: TRUE PRE-UPDATE GUARDRAILS ---
+                current_omega_mag = float(np.linalg.norm(g))
                 v_world = eskf_talos.orientation @ pred_vel_local
                 residual_pre = v_world - eskf_talos.velocity
                 innovation_norm = float(np.linalg.norm(residual_pre))
@@ -1074,11 +1069,21 @@ def evaluate_eskf(model, df: pd.DataFrame, true_gravity: np.ndarray,
                 R_inv = np.linalg.inv(R_obs_used)
                 mahal_r_sq = float(residual_pre @ R_inv @ residual_pre)
 
-                # Hard safety gate before Kalman update to prevent catastrophic injections
-                if (pred_world_speed > fp_max_pred_world_speed_mps) or (innovation_norm > fp_max_innovation_norm_mps):
+                # 1. Shock Absorber (Absolute) & 2. Kinematic Boundary (Velocity/Innovation)
+                if (current_omega_mag > 4.0) or (pred_world_speed > fp_max_pred_world_speed_mps) or (innovation_norm > fp_max_innovation_norm_mps):
                     safety_reject_count += 1
-                if accepted is False:
-                    slap_count += 1
+                    accepted = False
+                    mahal_sq = 0.0 # Bypassed
+                else:
+                    # ONLY update if the physical and kinematic reality checks pass
+                    accepted, mahal_sq = eskf_talos.update_local_velocity(
+                        pred_vel_local,
+                        R_obs=R_obs_used,
+                        slap_threshold=fp_slap_threshold,
+                    )
+
+                if accepted is False and current_omega_mag <= 4.0:
+                    slap_count += 1 # Standard Mahalanobis rejection
                     
                 # --- Capture Lens 1 & 2 Data ---
                 # Current local prediction from model (already in m/s)
@@ -1573,7 +1578,8 @@ def main():
     history    = []
 
     bad_rounds    = 0
-    best_ate_ever = float('inf')
+    best_ate_ever = float("inf")
+    best_fusion_params = None
     best_ate_round = -1
     cat_strikes = 0
     blacklisted_sids = set()
@@ -1783,6 +1789,7 @@ def main():
 
         if mean_ate < best_ate_ever:
             best_ate_ever = mean_ate
+            best_fusion_params = copy.deepcopy(fusion_params)
             best_ate_round = round_idx
             bad_rounds    = 0
             shutil.copy(golden / 'talos.pth', run_dir / 'talos_best_physical.pth')
@@ -1807,7 +1814,7 @@ def main():
 
             fusion_params = darwin.evolve(
                 evaluate_fn=_darwin_evaluate,
-                parent_params=fusion_params,
+                parent_params=best_fusion_params or fusion_params,
                 summary_history=summary_history,
                 run_dir=run_dir,
             )

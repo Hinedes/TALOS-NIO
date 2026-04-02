@@ -36,7 +36,7 @@ LEVER_ARM = np.array([-0.00402517, 0.10088029, 0.08070602], dtype=np.float64)
 
 # Veto threshold — residual magnitude above this triggers suppression
 # Tuned to ~3-sigma of expected sensor noise contribution
-DEFAULT_THRESHOLD = 0.8  # m/s²
+DEFAULT_THRESHOLD = 0.35  # m/s²
 
 
 class LAIDBouncer:

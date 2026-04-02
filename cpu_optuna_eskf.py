@@ -141,9 +141,13 @@ def evaluate_trajectory(params, run_dir, val_df, val_gravity, npz_path):
     fp_pred_vel_gain = params.get('PRED_VEL_GAIN', 1.0)
     fp_use_dynamic_r_obs = params.get('USE_DYNAMIC_R_OBS', False)
     fp_r_obs_fixed_diag = params.get('R_OBS_FIXED_DIAG', 0.10)
-    fp_slap_threshold = params.get('SLAP_THRESHOLD', 4.0)
+    fp_slap_threshold  = params.get('SLAP_THRESHOLD', 4.0)
+    fp_max_pred_speed  = params.get('MAX_PRED_WORLD_SPEED_MPS', 5.0)
+    fp_max_innov_norm  = params.get('MAX_INNOVATION_NORM_MPS', 5.0)
+    fp_cage_radius     = params.get('CAGE_RADIUS', 0.30)
 
     talos_positions = []
+    npp_center = np.zeros(3)
     
     for step in range(len(val_df)):
         a, g = accel[step], gyro[step]
@@ -152,16 +156,24 @@ def evaluate_trajectory(params, run_dir, val_df, val_gravity, npz_path):
         if step in neural_preds:
             pred_vel_raw, pred_cov_raw = neural_preds[step]
             pred_vel_local = pred_vel_raw * fp_pred_vel_gain
-            
-            # The Physics Parity Fix: Dynamic vs Fixed R_obs
-            if fp_use_dynamic_r_obs:
-                pred_var = np.exp(pred_cov_raw)
-                r_obs_diag = np.clip(pred_var, 0.05, 2.00)  # Hardcoded limits from incremental_train.py
-                R_obs_used = np.diag(r_obs_diag.astype(np.float64))
-            else:
-                R_obs_used = np.eye(3) * fp_r_obs_fixed_diag
-            
-            eskf.update_local_velocity(pred_vel_local, R_obs_used, slap_threshold=fp_slap_threshold)
+
+            pred_speed = np.linalg.norm(eskf.orientation @ pred_vel_local)
+            innov_norm = np.linalg.norm(pred_vel_local - eskf.orientation.T @ eskf.velocity)
+
+            if pred_speed <= fp_max_pred_speed and innov_norm <= fp_max_innov_norm:
+                if fp_use_dynamic_r_obs:
+                    pred_var = np.exp(pred_cov_raw)
+                    r_obs_diag = np.clip(pred_var, 0.05, 2.00)
+                    R_obs_used = np.diag(r_obs_diag.astype(np.float64))
+                else:
+                    R_obs_used = np.eye(3) * fp_r_obs_fixed_diag
+                eskf.update_local_velocity(pred_vel_local, R_obs_used, slap_threshold=fp_slap_threshold)
+
+        displacement = eskf.position - npp_center
+        dist = np.linalg.norm(displacement)
+        if dist > fp_cage_radius:
+            eskf.position = npp_center + displacement * (fp_cage_radius / dist)
+        npp_center += 0.001 * (eskf.position - npp_center)
 
         talos_positions.append(eskf.position.copy())
 
@@ -212,6 +224,9 @@ def optimize_run(run_dir_str, n_trials=500):
             if not use_dynamic:
                 params['R_OBS_FIXED_DIAG'] = trial.suggest_float("R_OBS_FIXED_DIAG", 0.01, 1.0, log=True)
             
+            params['CAGE_RADIUS']              = trial.suggest_float("CAGE_RADIUS", 0.10, 1.00)
+            params['MAX_PRED_WORLD_SPEED_MPS'] = trial.suggest_float("MAX_PRED_WORLD_SPEED_MPS", 2.0, 10.0)
+            params['MAX_INNOVATION_NORM_MPS']  = trial.suggest_float("MAX_INNOVATION_NORM_MPS", 2.0, 10.0)
             return evaluate_trajectory(params, run_dir, val_df_walk, val_gravity, npz_path)
 
         # Use SQLite for multi-process safe synchronization
